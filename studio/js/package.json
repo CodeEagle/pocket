@@ -1,0 +1,15 @@
+{
+  "name": "pocket-studio-guest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pocket/ui": "file:../../sdk/packages/pocket_ui"
+  },
+  "scripts": {
+    "build": "bun ../../sdk/scripts/build_guest.ts --project-root=\"$PWD\" --copy-assets-to=\"$PWD/../assets\" --keep-source=\"$PWD/.pocket-build/app.js\"",
+    "test": "bash scripts/test_guest.sh",
+    "test:unit": "bun test tests/studio_client.test.ts tests/tree.test.ts",
+    "test:guest": "bun test tests/studio_guest_native.test.ts"
+  }
+}

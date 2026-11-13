@@ -1,0 +1,12 @@
+{
+  "id": "pocket-studio",
+  "appId": "dev.pocket.studio",
+  "name": "Pocket Studio",
+  "title": "Pocket Studio",
+  "version": "0.1.0",
+  "build": 1,
+  "tickHz": 60,
+  "entry": "app.tsx",
+  "output": "app",
+  "framework": "solid"
+}

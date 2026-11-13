@@ -126,6 +126,7 @@ void main() {
         additionalCapabilities: <String>{'native.approved'},
         keyboardInputEnabled: true,
         keyboardAutofocus: true,
+        rawTextInputEnabled: true,
         fontFamilyFallback: <String>['LanternSerif'],
         keyboardButtonMap: <LogicalKeyboardKey, int>{
           LogicalKeyboardKey.space: 0x2000,
@@ -147,6 +148,10 @@ void main() {
       expect(merged.memoryLimits, policy.memoryLimits);
       expect(merged.keyboardInputEnabled, isTrue);
       expect(merged.keyboardAutofocus, isTrue);
+      expect(merged.rawTextInputEnabled, isTrue);
+      expect(merged.copyWith().rawTextInputEnabled, isTrue);
+      expect(merged.copyWith(rawTextInputEnabled: false), isNot(merged));
+      expect(remote.rawTextInputEnabled, isFalse);
       expect(merged.keyboardButtonMap, policy.keyboardButtonMap);
       expect(merged.copyWith().keyboardInputEnabled, isTrue);
       expect(merged.copyWith().keyboardButtonMap, policy.keyboardButtonMap);

@@ -236,6 +236,7 @@ final class PocketAppConfig {
     this.fontFamilyFallback = const <String>[],
     this.keyboardInputEnabled = false,
     this.keyboardAutofocus = false,
+    this.rawTextInputEnabled = false,
     this.keyboardButtonMap = const <LogicalKeyboardKey, int>{},
     this.allowedPermissions = const {},
     this.pluginFactories = const [],
@@ -290,6 +291,10 @@ final class PocketAppConfig {
   final bool keyboardInputEnabled;
   final bool keyboardAutofocus;
 
+  /// Host opt-in for guest-requested raw key/IME sessions (`textInput.rawOpen`).
+  /// See docs/STUDIO_TEXT_INPUT.md. Policy stays in the guest; this only allows it.
+  final bool rawTextInputEnabled;
+
   /// Per-app overrides for Flutter logical keys. Values are PocketJS `BTN`
   /// bits; omitted keys keep PocketView's standard mapping.
   final Map<LogicalKeyboardKey, int> keyboardButtonMap;
@@ -331,6 +336,7 @@ final class PocketAppConfig {
     Iterable<String>? fontFamilyFallback,
     bool? keyboardInputEnabled,
     bool? keyboardAutofocus,
+    bool? rawTextInputEnabled,
     Map<LogicalKeyboardKey, int>? keyboardButtonMap,
     String? bootstrapMetadataJson,
     String? bootstrapManifestJson,
@@ -349,6 +355,7 @@ final class PocketAppConfig {
         : List<String>.unmodifiable(fontFamilyFallback),
     keyboardInputEnabled: keyboardInputEnabled ?? this.keyboardInputEnabled,
     keyboardAutofocus: keyboardAutofocus ?? this.keyboardAutofocus,
+    rawTextInputEnabled: rawTextInputEnabled ?? this.rawTextInputEnabled,
     keyboardButtonMap: keyboardButtonMap ?? this.keyboardButtonMap,
     allowedPermissions: allowedPermissions,
     pluginFactories: pluginFactories == null
@@ -388,6 +395,7 @@ final class PocketAppConfig {
     fontFamilyFallback: policy.fontFamilyFallback,
     keyboardInputEnabled: policy.keyboardInputEnabled,
     keyboardAutofocus: policy.keyboardAutofocus,
+    rawTextInputEnabled: policy.rawTextInputEnabled,
     keyboardButtonMap: policy.keyboardButtonMap,
     allowedPermissions: policy.allowedPermissions,
     pluginFactories: policy.pluginFactories,
@@ -443,6 +451,7 @@ final class PocketAppConfig {
           showFps == other.showFps &&
           keyboardInputEnabled == other.keyboardInputEnabled &&
           keyboardAutofocus == other.keyboardAutofocus &&
+          rawTextInputEnabled == other.rawTextInputEnabled &&
           mapEquals(keyboardButtonMap, other.keyboardButtonMap) &&
           recordingFactory == other.recordingFactory &&
           diagnostics == other.diagnostics &&
@@ -469,6 +478,7 @@ final class PocketAppConfig {
     showFps,
     keyboardInputEnabled,
     keyboardAutofocus,
+    rawTextInputEnabled,
     Object.hashAllUnordered(
       keyboardButtonMap.entries.map((e) => Object.hash(e.key, e.value)),
     ),

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket.studio",
+  "name": "pocket-studio",
+  "title": "Pocket Studio",
+  "version": "0.1.0",
+  "build": 1,
+  "engine": {
+    "capabilities": {
+      "requires": ["text.glyphs.baked", "ui.compositor-surfaces"],
+      "enhances": []
+    }
+  },
+  "app": { "entry": "app.tsx", "output": "app", "framework": "solid" }
+}

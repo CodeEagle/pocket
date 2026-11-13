@@ -267,6 +267,7 @@ final class PocketGuestSessionState extends State<PocketGuestSession> {
       enableSceneCapture: widget.enableSceneCapture,
       keyboardInputEnabled: config.keyboardInputEnabled,
       keyboardAutofocus: config.keyboardAutofocus,
+      rawTextInputEnabled: config.rawTextInputEnabled,
       keyboardButtonMap: config.keyboardButtonMap,
       backgroundColor: widget.backgroundColor,
       viewport: widget.viewport,

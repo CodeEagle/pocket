@@ -1,0 +1,36 @@
+name: pocket_studio_app
+description: "Pocket Studio: a thin Flutter macOS host for the JS Studio guest."
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  pocket_sdk:
+    path: ../sdk
+  pocket_studio:
+    path: ../sdk/packages/pocket_studio
+  pocket_clipboard:
+    path: ../sdk/packages/pocket_clipboard
+
+dev_dependencies:
+  pocket_flutter:
+    path: ../sdk/packages/pocket_flutter
+  pocket_services:
+    path: ../sdk/packages/pocket_services
+  flutter_lints: ^5.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  config:
+    enable-swift-package-manager: true
+  uses-material-design: true
+  assets:
+    - assets/app.qjbc
+    - assets/app.bytecode.json
+    - assets/guest-manifest.json
+    - assets/app.pak

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-guest-manifest.json",
+  "protocolVersion": 1,
+  "capabilities": {
+    "requires": [
+      "text.layout.native",
+      "ui.compositor-surfaces"
+    ],
+    "optional": [
+      "clipboard.readText",
+      "clipboard.hasText",
+      "clipboard.writeText",
+      "system.runtime.configure",
+      "system.runtime.create",
+      "system.runtime.destroy",
+      "system.runtime.post",
+      "system.runtime.respond",
+      "studio.artifacts.inspect",
+      "studio.artifacts.list",
+      "studio.build.cancel",
+      "studio.build.events",
+      "studio.build.start",
+      "studio.build.status",
+      "studio.fs.delete",
+      "studio.fs.mkdir",
+      "studio.fs.read",
+      "studio.fs.readChunk",
+      "studio.fs.rename",
+      "studio.fs.rmdir",
+      "studio.fs.stat",
+      "studio.fs.tree",
+      "studio.fs.upload.abort",
+      "studio.fs.upload.begin",
+      "studio.fs.upload.chunk",
+      "studio.fs.upload.commit",
+      "studio.fs.watch",
+      "studio.fs.write",
+      "studio.logs.tail",
+      "studio.preview.deploy",
+      "studio.preview.deployCancel",
+      "studio.preview.deployStatus",
+      "studio.preview.devices",
+      "studio.preview.publish",
+      "studio.project.create",
+      "studio.project.list",
+      "studio.project.open",
+      "studio.project.settings.get",
+      "studio.project.settings.set",
+      "studio.publish.history",
+      "studio.publish.offline",
+      "studio.publish.plan",
+      "studio.publish.publish",
+      "studio.service.health",
+      "studio.service.upgrade.status"
+    ]
+  },
+  "permissions": {
+    "optional": [
+      "clipboard.read",
+      "clipboard.write",
+      "studio.read",
+      "studio.write",
+      "studio.build",
+      "studio.deploy",
+      "studio.publish"
+    ]
+  },
+  "version": "0.1.0",
+  "build": 1,
+  "fonts": "host"
+}

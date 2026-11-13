@@ -143,10 +143,16 @@ after a rebuild, via option (a), then (b) if (a) is too slow. Measure save → f
 latency. Pass: reload works without restarting Studio; latency < 1.5 s for the counter fixture
 (`sdk/editor/test/fixtures/counter`).
 
-## 5. Capability names: provisional, not frozen
+## 5. Capability names: frozen in M1
 
-The handover says to freeze them at the end of M0. They are **not frozen**: Spikes A and C can still
-change `studio.fs` chunking and the `studio.preview` shape. Current mapping to real routes:
+**Update (M1):** the capability names, params, results and route mapping are now FROZEN in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) ("Capability contract"). The table below is the original M0 provisional
+mapping, kept for history; where they differ, `ARCHITECTURE.md` wins (for example `studio.preview.load/reload/close`
+became `studio.preview.publish` plus a guest-side `system.runtime.*` reload, and `studio.clipboard.*` is the SDK
+clipboard plugin).
+
+Original M0 text: the handover said to freeze them at the end of M0 but Spikes A and C could still
+change `studio.fs` chunking and the `studio.preview` shape. Mapping to real routes at M0:
 
 | Capability.call | Route |
 | --- | --- |

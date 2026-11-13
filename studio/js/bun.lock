@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "pocket-studio-guest",
+      "dependencies": {
+        "@pocket/ui": "file:../../sdk/packages/pocket_ui",
+      },
+    },
+  },
+  "packages": {
+    "@pocket/ui": ["@pocket/ui@file:../../sdk/packages/pocket_ui", {}],
+  }
+}

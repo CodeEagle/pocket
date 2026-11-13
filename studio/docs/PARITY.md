@@ -4,7 +4,7 @@ Source of truth: `sdk/editor/server.ts`, `sdk/editor/preview.ts`, `sdk/editor/no
 `sdk/editor/diagnostics.ts`, `sdk/editor/client/index.html` and `sdk/editor/client/editor.js`
 at commit `f59d2df`. Every row was read from code, not from the handover brief.
 
-Status column: `[ ]` not started in the Pocket Studio, `[x]` reached parity, `—` deliberately out of
+Status column: `[ ]` not started in the Pocket Studio, `[~]` transport/provider done but no Studio UI yet, `[x]` reached parity, `—` deliberately out of
 scope for v1 (needs owner sign-off before M6 cutover).
 
 ## 1. Transport and security (applies to every route)
@@ -41,26 +41,26 @@ Auth column: `R` = read guards only; `W` = read guards + write credential.
 | --- | --- | --- | --- | --- | --- |
 | GET | `/health` | R | `{ok, service, pid, version, csrfToken, bluetooth, workspace, projectRoot?, projectId?, flutterRoot?, updatePackageVersion?}` | host-internal (lifecycle) | [ ] |
 | GET | `/` , `/<name>.css|js` | R | web client static files | — (web only) | — |
-| GET | `/api/studio/upgrade` | R | upgrade status | `studio.service.upgrade.status` | [ ] |
+| GET | `/api/studio/upgrade` | R | upgrade status | `studio.service.upgrade.status` | [~] |
 | POST | `/api/studio/upgrade/check` | W | `{autoApply?, forceApply?}` | `studio.service.upgrade.check` | [ ] |
 | POST | `/api/studio/upgrade/apply` | W | → 409 in source checkouts | `studio.service.upgrade.apply` | [ ] |
 | GET | `/api/preview/device` | R | preview device profile | `studio.preview` | [ ] |
-| GET | `/api/devices` | R | `flutter devices --machine` list | `studio.preview.devices` | [ ] |
+| GET | `/api/devices` | R | `flutter devices --machine` list | `studio.preview.devices` | [~] |
 | GET | `/api/codex/status`, `/api/codex/models` | R | Codex availability | — (UI removed from web Studio) | — |
 
 ### 2.2 Projects, config, files
 
 | Method | Path | Auth | Payload / response | Studio capability | Parity |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/projects` | R | project list with status | `studio.project.list` | [ ] |
-| POST | `/api/projects` | W | `{id, template: app|game, ...config}` → 201 | `studio.project.create` | [ ] |
-| GET | `/api/projects/:id` | R | config + status | `studio.project.open` | [ ] |
-| GET/PUT | `/api/projects/:id/config` | R/W | `EditorConfig` merge; bumps revision | `studio.project.settings.get/set` | [ ] |
-| GET/PUT | `/api/projects/:id/source` | R/W | `{path:"app.tsx", source, bytes, revision}`; ≤16 MiB, no NUL | `studio.fs.read/write` (alias) | [ ] |
-| GET | `/api/projects/:id/files` | R | `{files:[{path, bytes}], revision}` editable text files only | `studio.fs.tree` | [ ] |
-| GET/PUT | `/api/projects/:id/files/<rel>` | R/W | `{path, content, bytes, revision}`; ≤16 MiB, UTF-8, no NUL | `studio.fs.read/write` | [ ] |
-| GET/PUT | `/api/projects/:id/manifest` | R/W | raw `manifest.json`; PUT ≤256 KiB | `studio.fs.read/write` (manifest) | [ ] |
-| GET | `/api/projects/:id/assets` | R | `{assets: string[]}` flat names under `assets/` | `studio.fs.tree` (assets) | [ ] |
+| GET | `/api/projects` | R | project list with status | `studio.project.list` | [~] |
+| POST | `/api/projects` | W | `{id, template: app|game, ...config}` → 201 | `studio.project.create` | [~] |
+| GET | `/api/projects/:id` | R | config + status | `studio.project.open` | [~] |
+| GET/PUT | `/api/projects/:id/config` | R/W | `EditorConfig` merge; bumps revision | `studio.project.settings.get/set` | [~] |
+| GET/PUT | `/api/projects/:id/source` | R/W | `{path:"app.tsx", source, bytes, revision}`; ≤16 MiB, no NUL | `studio.fs.read/write` (alias) | [~] |
+| GET | `/api/projects/:id/files` | R | `{files:[{path, bytes}], revision}` editable text files only | `studio.fs.tree` | [~] |
+| GET/PUT | `/api/projects/:id/files/<rel>` | R/W | `{path, content, bytes, revision}`; ≤16 MiB, UTF-8, no NUL | `studio.fs.read/write` | [~] |
+| GET/PUT | `/api/projects/:id/manifest` | R/W | raw `manifest.json`; PUT ≤256 KiB | `studio.fs.read/write` (manifest) | [~] |
+| GET | `/api/projects/:id/assets` | R | `{assets: string[]}` flat names under `assets/` | `studio.fs.tree` (assets) | [~] |
 | POST | `/api/projects/:id/assets` | W | multipart `file`, ≤32 MiB, safe flat name | `studio.fs.write` (asset, chunked) | [ ] |
 | GET/PUT | `/api/projects/:id/resources` | R/W | resource inventory / placements `{revision, packageId, placements}` | `studio.artifacts.resources` | [ ] |
 | GET | `/api/projects/:id/resources/preview?revision&package&key` | R | thumbnail image | `studio.artifacts.resources` | [ ] |
@@ -76,10 +76,10 @@ Auth column: `R` = read guards only; `W` = read guards + write credential.
 
 | Method | Path | Auth | Payload / response | Studio capability | Parity |
 | --- | --- | --- | --- | --- | --- |
-| POST | `/api/projects/:id/build` (alias `/compile`) | W | `{}` → 202 + status; queued `buildGuest` | `studio.build.start` | [ ] |
-| GET | `/api/projects/:id/status` | R | `EditorStatus` (revision, builtRevision, busy, error, last 200 logs, artifacts, publish) | `studio.build.status` | [ ] |
-| GET | `/api/projects/:id/logs` | R | `{logs: string[≤200], error}`; lines ≤4096 chars | `studio.logs.tail` | [ ] |
-| GET | `/api/projects/:id/artifacts/<name>` | R | one of `app.js app.qjbc app.bytecode.json app.pak guest-manifest.json build.json app.worker.qjbc app.worker.bytecode.json` | `studio.artifacts.inspect` | [ ] |
+| POST | `/api/projects/:id/build` (alias `/compile`) | W | `{}` → 202 + status; queued `buildGuest` | `studio.build.start` | [~] |
+| GET | `/api/projects/:id/status` | R | `EditorStatus` (revision, builtRevision, busy, error, last 200 logs, artifacts, publish) | `studio.build.status` | [~] |
+| GET | `/api/projects/:id/logs` | R | `{logs: string[≤200], error}`; lines ≤4096 chars | `studio.logs.tail` | [~] |
+| GET | `/api/projects/:id/artifacts/<name>` | R | one of `app.js app.qjbc app.bytecode.json app.pak guest-manifest.json build.json app.worker.qjbc app.worker.bytecode.json` | `studio.artifacts.inspect` | [~] |
 | GET/POST | `/api/projects/:id/diagnostics` | R/W | diagnostics export / record | `studio.logs.diagnostics` | [ ] |
 
 **Added on the service:** `POST build/cancel` (aborts the compiler process group; final state
@@ -99,8 +99,8 @@ the JSX-lowered intermediate module.
 | GET/HEAD | `/api/projects/:id/preview/resource`, `/media?asset=` | R | resource bytes | — (child guest reads its own pack) | — |
 | POST | `/api/projects/:id/preview-publish` | W | **new**: packages the current successful build into the signed `preview` slot (fixed id `dev.pocket.studio.preview`, dedicated key, monotonic build) → `{buildId, revision, generation, version, build, packageId, manifestUrl, hostConfigUrl, payloadSha256, runtimeAbi, timingsMs}`; 409 without a current successful build | `studio.preview.load/reload` (child close + `create` without `cacheFirst`) | [~] service + Linux FFI proof done; macOS compositing open |
 | GET | `/preview/pocket/:host/:id/preview/<artifact>` | R (public) | **new**: signed preview slot served like `/test` and `/stable` | host update coordinator | [~] |
-| GET/POST | `/api/projects/:id/deploy` | R/W | `{deviceId}` → 202 deployment job | `studio.preview.deploy` | [ ] |
-| GET/DELETE | `/api/projects/:id/deploy/:job` | R/W | job status / cancel | `studio.preview.deploy` | [ ] |
+| GET/POST | `/api/projects/:id/deploy` | R/W | `{deviceId}` → 202 deployment job | `studio.preview.deploy` | [~] |
+| GET/DELETE | `/api/projects/:id/deploy/:job` | R/W | job status / cancel | `studio.preview.deploy` | [~] |
 | GET/POST/DELETE | `/api/projects/:id/wechat` | R/W | WeChat mini-program preview | — (v1 out of scope; ask owner) | — |
 | POST/GET/DELETE | `/api/projects/:id/codex/turn[/:turn]` | W/R/W | Codex turn | — (removed from web UI) | — |
 
@@ -110,12 +110,12 @@ the JSX-lowered intermediate module.
 
 | Method | Path | Auth | Payload / response | Studio capability | Parity |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/projects/:id/publish-targets?channel=test|release` | R | target summary, reusable packages | `studio.publish.plan` | [ ] |
-| POST | `/api/projects/:id/publish` (alias `/package`) | W | `{channel?: test|release}` → manifest, URLs, packages | `studio.publish.publish` | [ ] |
-| POST | `/api/projects/:id/package-offline` | W | offline archive URL | `studio.publish.offline` | [ ] |
-| GET | `/api/projects/:id/versions` | R | version backend snapshot (slots, history) | `studio.publish.history` | [ ] |
+| GET | `/api/projects/:id/publish-targets?channel=test|release` | R | target summary, reusable packages | `studio.publish.plan` | [~] |
+| POST | `/api/projects/:id/publish` (alias `/package`) | W | `{channel?: test|release}` → manifest, URLs, packages | `studio.publish.publish` | [~] |
+| POST | `/api/projects/:id/package-offline` | W | offline archive URL | `studio.publish.offline` | [~] |
+| GET | `/api/projects/:id/versions` | R | version backend snapshot (slots, history) | `studio.publish.history` | [~] |
 | GET/HEAD | `/updates/…`, `/pocket/…`, `/test/pocket/…`, `/stable/pocket/…` | R | signed manifests and blobs for clients | not a guest capability (served to devices) | n/a |
-| GET | `/releases/:id[/<release>].tar.gz` | R | release archives | `studio.publish.history` (download link) | [ ] |
+| GET | `/releases/:id[/<release>].tar.gz` | R | release archives | `studio.publish.history` (download link) | [~] |
 
 ### 2.6 Visual novel editor (`sdk/editor/novel.ts`)
 
@@ -137,10 +137,10 @@ plus stage/localization/authoring/backups modules).
 
 | Area | Feature | Element ids | Pocket Studio milestone | Parity |
 | --- | --- | --- | --- | --- |
-| Shell | Project switcher, project title/subtitle/state | `project-switcher`, `projects`, `project-title`, `project-state` | M1 | [ ] |
-| Shell | New project dialog with App/Game template | `new-project`, `create-dialog`, `create-form` | M1 | [ ] |
-| Shell | Left rail: stage, source, console, resources, settings, versions | `rail-*` | M1 | [ ] |
-| Shell | Notice toast | `notice*` | M1 | [ ] |
+| Shell | Project switcher, project title/subtitle/state | `project-switcher`, `projects`, `project-title`, `project-state` | M1 | [x] (list + open + 暂无项目 state; subtitle/state chips later) |
+| Shell | New project dialog with App/Game template | `new-project`, `create-dialog`, `create-form` | M1 | [x] (App/Game, id, name, appId; version/tickHz fields later) |
+| Shell | Left rail: stage, source, console, resources, settings, versions | `rail-*` | M1 | [~] (rail present; only 项目/源码 active, others say "later milestone") |
+| Shell | Notice toast | `notice*` | M1 | [~] (error text line, no toast) |
 | Shell | Studio self-upgrade bar | `studio-upgrade-*` | M6 | [ ] |
 | Source | File picker, source editor, save, reload, bytes/revision, split toggle, close | `file-picker`, `source`, `save`, `refresh-source`, `source-*` | M2 / M4 | [ ] |
 | Preview | Viewport picker, phone bezel toggle, regions overlay, resize height | `viewport-picker`, `preview-bezel-toggle`, `toggle-regions`, `resize-preview-height` | M3 | [ ] |
@@ -152,7 +152,7 @@ plus stage/localization/authoring/backups modules).
 | Console | Signing tab: publish test, target picker, channel, reused packages | `publish-test`, `publish-target-*` | M5 | [ ] |
 | Console | Artifacts tab: artifact list, runtime ABI | `artifacts`, `runtime-abi` | M5 | [ ] |
 | Inspector | Resources: package picker, placement list, save | `resource-*`, `save-resources` | M5 | [ ] |
-| Inspector | Settings: name, title, appId, version, build, tickHz | `config-*` | M1 | [ ] |
+| Inspector | Settings: name, title, appId, version, build, tickHz | `config-*` | M1 | [ ] (`studio.project.settings.*` transport done, UI pending) |
 | Inspector | Versions: backend origin, slots, history, host guide, app config | `version-*` | M5 | [ ] |
 | Tools | Export diagnostics | `export-diagnostics` | M7 | [ ] |
 | Tools | Open visual novel editor | `novel-open` | — (ask owner) | — |
@@ -178,3 +178,13 @@ the Pocket Studio must keep green. Test counts are `test(`/`it(` calls per file.
 | WeChat | `wechat` (4), `wechat_routes` (1), `wechat_ui` (1), `wechat_inline_browser` (1) | Out of v1 scope |
 | Codex / Bluetooth | `codex` (11), `local_bluetooth` (6), `noble_bluetooth` (6) | Out of v1 scope |
 | Layout | `studio_workbench_layout` (1) | Web-only |
+
+## 5. M1 status (shell and transport)
+
+`[~]` in the tables above means: the capability is implemented and tested in the provider/client
+(`studio/docs/ARCHITECTURE.md`, frozen table) but the Studio UI for it is not built yet. `[x]` is reserved for
+rows with working guest UI. M1 reached: provider with all 37 capabilities, scrubbing, CSRF, SSE streams, service
+lifecycle, JS client with verified chunked transfer, shell with rail, project list/open/create, read-only file
+tree and viewer. Exit test: `studio/test/studio_host_test.dart` ("the Studio window lists the files of the demo
+JS project using capabilities only") passes on the real native library and the real editor service. Not
+verified (needs macOS): the app window, IME, on-screen compositing.

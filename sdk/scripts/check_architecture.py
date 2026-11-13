@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guard the two-entry layout: SDK is reusable, demo is its consumer."""
+"""Guard the layout: SDK is reusable; demo/ and studio/ are consumers."""
 
 from pathlib import Path
 import re
@@ -8,6 +8,8 @@ SDKROOT = Path(__file__).resolve().parents[1]
 REPOROOT = SDKROOT.parent
 DEMOROOT = REPOROOT / "demo"
 DEMO_JS = DEMOROOT / "js"
+STUDIOROOT = REPOROOT / "studio"
+STUDIO_JS = STUDIOROOT / "js"
 errors: list[str] = []
 
 sdk_required = [
@@ -30,12 +32,23 @@ demo_required = [
     "lib/main.dart",
     "pubspec.yaml",
 ]
+studio_required = [
+    "js/app.tsx",
+    "js/pocket.json",
+    "js/manifest.json",
+    "lib/main.dart",
+    "pubspec.yaml",
+    "docs/ARCHITECTURE.md",
+]
 for name in sdk_required:
     if not (SDKROOT / name).is_file():
         errors.append(f"missing SDK entry: {name}")
 for name in demo_required:
     if not (DEMOROOT / name).is_file():
         errors.append(f"missing demo entry: {name}")
+for name in studio_required:
+    if not (STUDIOROOT / name).is_file():
+        errors.append(f"missing studio entry: {name}")
 
 legacy_names = {
     "pocketjs_bundle_runner.dart", "pocket_ui_components.dart",
@@ -57,7 +70,7 @@ if "package:pocket_hardware/" in (SDKROOT / "lib/pocket_sdk.dart").read_text():
     errors.append("core SDK must not re-export optional hardware")
 
 hardware_modules = {"camera", "bluetooth", "sensors", "location", "biometrics", "weather"}
-optional_packages = {f"pocket_{name}" for name in hardware_modules} | {"pocket_permissions", "pocket_dio", "pocket_clipboard"}
+optional_packages = {f"pocket_{name}" for name in hardware_modules} | {"pocket_permissions", "pocket_dio", "pocket_clipboard", "pocket_studio"}
 for package in optional_packages:
     if re.search(rf"^  {package}:", (SDKROOT / "pubspec.yaml").read_text(), re.M):
         errors.append(f"core SDK must not statically depend on optional {package}")
@@ -74,7 +87,7 @@ for base in ("pocket_hardware_core", "pocket_hardware"):
         errors.append(f"{base} must not retain a second native hardware implementation")
 
 sdk_production = [SDKROOT / "lib", SDKROOT / "packages"]
-source_roots = [*sdk_production, SDKROOT / "native/src", SDKROOT / "scripts", DEMO_JS, DEMOROOT / "lib"]
+source_roots = [*sdk_production, SDKROOT / "native/src", SDKROOT / "scripts", DEMO_JS, DEMOROOT / "lib", STUDIO_JS, STUDIOROOT / "lib"]
 source_suffixes = {".dart", ".ts", ".tsx", ".rs"}
 legacy_root_path = re.compile(
     r'''["'`](?:[^"'`]*[/\\])?(?:guest|host)/[^\s"'`]+["'`]'''
@@ -92,8 +105,14 @@ for base in source_roots:
         if path.is_relative_to(sdk_production[0]) or path.is_relative_to(sdk_production[1]):
             if re.search(r"(?:import|export)\s+[^;]*(?:demo/|\.\./demo/|/demo/)", source):
                 errors.append(f"SDK depends on demo internals: {path.relative_to(REPOROOT)}")
+            if re.search(r"(?:import|export)\s+[^;]*(?<![A-Za-z0-9_])studio/", source):
+                errors.append(f"SDK depends on studio internals: {path.relative_to(REPOROOT)}")
             if legacy_root_path.search(source):
                 errors.append(f"SDK depends on legacy guest/host root: {path.relative_to(REPOROOT)}")
+        if path.is_relative_to(STUDIOROOT) and re.search(r"(?:import|export)\s+[^;]*(?:demo/|\.\./demo/|/demo/)", source):
+            errors.append(f"studio depends on demo internals: {path.relative_to(REPOROOT)}")
+        if path.is_relative_to(DEMOROOT) and re.search(r"(?:import|export)\s+[^;]*(?<![A-Za-z0-9_])studio/", source):
+            errors.append(f"demo depends on studio internals: {path.relative_to(REPOROOT)}")
         if "simulateWatchdogCheck" in source or "PocketSyslibAotBundle" in source:
             errors.append(f"legacy simulation: {path.relative_to(REPOROOT)}")
 
@@ -133,6 +152,30 @@ if demo_lib.exists():
 if (DEMOROOT / "pubspec.yaml").exists() and "assets/app.js" in (DEMOROOT / "pubspec.yaml").read_text():
     errors.append("demo host ships JS source instead of bytecode-only entry")
 
+studio_lib = STUDIOROOT / "lib"
+if studio_lib.exists():
+    for dart_file in sorted(studio_lib.rglob("*.dart")):
+        rel = dart_file.relative_to(STUDIOROOT)
+        if dart_file.relative_to(studio_lib).as_posix() != "main.dart":
+            errors.append(f"forbidden extra Dart file in studio host: {rel}")
+            continue
+        lines = dart_file.read_text(errors="replace").splitlines()
+        if len(lines) > 100:
+            errors.append(f"studio main.dart exceeds thin host limit (max 100 lines, got {len(lines)}): {rel}")
+        source = "\n".join(lines)
+        for pattern in [r"Navigator\.", r"\bCounter\b", r"case\s+['\"]View\.", r"PocketUiNode", r"\bStatefulWidget\b", r"\bsetState\b"]:
+            if re.search(pattern, source):
+                errors.append(f"Flutter studio host owns application behavior ({pattern}): {rel}")
+if (STUDIOROOT / "pubspec.yaml").exists() and "assets/app.js" in (STUDIOROOT / "pubspec.yaml").read_text():
+    errors.append("studio host ships JS source instead of bytecode-only entry")
+if (STUDIOROOT / "assets").is_dir():
+    for asset in (STUDIOROOT / "assets").rglob("*"):
+        if asset.is_file() and asset.suffix in {".js", ".ts", ".tsx", ".jsx", ".mjs"}:
+            errors.append(f"studio assets must be bytecode only, found JS source: {asset.relative_to(REPOROOT)}")
+for platform in ("ios", "android", "windows", "linux"):
+    if (STUDIOROOT / platform).exists():
+        errors.append(f"studio is macOS-only for the first release; remove studio/{platform}")
+
 if errors:
     raise SystemExit("\n".join(errors))
-print("Architecture boundary passed: SDK/demo entries are present; SDK has no demo dependency or legacy business renderer.")
+print("Architecture boundary passed: SDK/demo/studio entries are present; SDK has no demo or studio dependency or legacy business renderer.")
