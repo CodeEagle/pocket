@@ -191,3 +191,9 @@ cd packages/pocket_flutter && POCKET_CODE_VIEW_FIXTURE_DIR=/tmp/cvfix \
   history UI), long lines are cut at 4,000 display columns, selection of a very large range
   allocates one rectangle per visible line only.
 * No automatic frame culling of rows outside the clip: rows exist for lines within the overscan only.
+
+## App-level key hook (`onKeyDown`, M7)
+
+`CodeView` offers every key-down (main text area and the find/replace fields) to `onKeyDown(key, owned)` before handling
+it. `owned` is true when the editor's keymap maps the key. Return `true` to consume it (the editor never sees it), anything
+else to let the editor continue. Used by the Studio shell for global shortcuts; see `SHARED_EDITOR_COMPONENTS.md`.

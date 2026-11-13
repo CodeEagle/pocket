@@ -20,3 +20,10 @@ export * from "./apple.tsx";
 // Preload compositor composition with the public UI entry so the pinned
 // compiler collects its class literals before bundling subpath imports.
 export * from "./system-surfaces.tsx";
+
+// Shared editor-shell components. Re-exported here (not only through subpaths) so the pinned compiler's pass 1,
+// which collects class literals from this public entry, sees their classes.
+export * from "./tree.tsx";
+export * from "./split-pane.tsx";
+export * from "./tabs.tsx";
+export * from "./toast-host.tsx";

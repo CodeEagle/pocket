@@ -31,6 +31,13 @@
     "./inline-text": "./src/inline-text.tsx",
     "./code": "./src/code/index.ts",
     "./code-view": "./src/code/view.tsx",
-    "./dev": "./src/dev.ts"
+    "./dev": "./src/dev.ts",
+    "./tree": "./src/tree.tsx",
+    "./tree-model": "./src/tree-model.ts",
+    "./split-pane": "./src/split-pane.tsx",
+    "./split-pane-model": "./src/split-pane-model.ts",
+    "./tabs": "./src/tabs.tsx",
+    "./toast-host": "./src/toast-host.tsx",
+    "./tabs-model": "./src/tabs-model.ts"
   }
 }

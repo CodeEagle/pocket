@@ -264,3 +264,16 @@ Android API 35 arm64 模拟器最终运行：
 
 集成测试结束后重新执行普通 `flutter build apk --debug --no-pub` 成功，
 `demo/build/app/outputs/flutter-apk/app-debug.apk` 为普通 Showcase 入口。
+
+## 2026-11-13: Studio M7 hardening (shared components, keymap hooks, recording regression)
+
+Linux container, real debug native library. New SDK surface: `Tree`, `SplitPane`, `TabsBar`, `ToastHost` (`SHARED_EDITOR_COMPONENTS.md`),
+`CodeView onKeyDown`, `InputField autoFocus`, and a `PocketView` fix: host font metrics are now synced right after the runtime is created
+(before compositor/offload/worker configuration) so a recording, which locks its font snapshot at the first recorded transaction, no longer
+defers the sync and fails to load a native-text bytecode. Evidence: `studio/test/studio_recording_test.dart` records a real Studio journey
+(open, edit, save, build, publish) and replays it offline and from the exported archive with every frame digest matching (about 355-375
+transactions, 122-130 frames). `packages/pocket_ui/test/shared_components_{model,native}.test.ts` (bun 3 + probe 5). Full SDK suites after the
+change: pocket_flutter 307 passed, sdk `flutter test` 202 passed, Rust all passed, pocket_services/pocket_studio/pocket_clipboard passed.
+`bun test packages/pocket_ui ...`: 321 passed, 5 failed; the failures (`accessibility.test.ts` x2, Duo close hitbox in `system_kernel.test.ts`,
+file-level errors in `wrap_text_lines.test.ts` and `flutter_widgets.test.ts`) come from `mock.module` leaking between files in one process and
+persist with the new exports removed; each file passes when run on its own.

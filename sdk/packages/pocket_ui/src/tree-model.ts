@@ -1,10 +1,11 @@
-// Pure helpers: build a folder tree from the service's flat file list and
-// flatten it into visible rows for a given expanded-folder set.
+// Pure model behind the Tree component (tree.tsx): build a folder tree from a flat
+// file list and flatten it into the rows visible for a given expanded-folder set.
+// No JSX/Solid imports, so bun unit tests and any state module can use it.
 export interface FlatFile { path: string; bytes: number }
 export interface TreeNode { name: string; path: string; kind: "file" | "directory"; bytes: number; children: TreeNode[] }
 export interface TreeRow { node: TreeNode; depth: number; expanded: boolean }
 
-/** `directories` lists folders that have no files yet (the service's flat list cannot show them). */
+/** `directories` lists folders that have no files yet (a flat file list cannot show them). */
 export function buildTree(files: readonly FlatFile[], directories: readonly string[] = []): TreeNode[] {
   const root: TreeNode = { name: "", path: "", kind: "directory", bytes: 0, children: [] };
   for (const directory of directories) {
@@ -49,16 +50,10 @@ export function visibleRows(tree: readonly TreeNode[], expanded: ReadonlySet<str
   return rows;
 }
 
+/** A copy of `expanded` with `path` added or removed. */
 export function toggled(expanded: ReadonlySet<string>, path: string): Set<string> {
   const next = new Set(expanded);
   if (next.has(path)) next.delete(path);
   else next.add(path);
   return next;
-}
-
-/** Caps what the read-only viewer paints (virtualized lines are M4). */
-export function viewerLines(text: string, maxLines = 400, maxColumns = 160): { lines: string[]; truncated: boolean } {
-  const all = text.split("\n");
-  const lines = all.slice(0, maxLines).map((line) => (line.length > maxColumns ? `${line.slice(0, maxColumns)}…` : line));
-  return { lines, truncated: all.length > maxLines };
 }

@@ -1508,6 +1508,8 @@ export function InputField(props: {
   maxLines?: number | null;
   /** Multi-line only: minimum visible lines (>= 1, clamped to maxLines). */
   minLines?: number;
+  /** Open the editing session shortly after mount (a dialog whose first action is typing). Off by default. */
+  autoFocus?: boolean;
 }): JSX.Element {
   const routeActive = useRouteActive();
   const scrollPage = useContext(ScrollablePageContext);
@@ -1899,10 +1901,21 @@ export function InputField(props: {
   // the overlay; emit only changed rects without keeping the ticker alive.
   onFrame(sendRectUpdate, { active: routeActive, continuous: false });
 
+  let unmounted = false;
   onCleanup(() => {
+    unmounted = true;
     close();
     if (activeTextInput === session) activeTextInput = undefined;
   });
+  // The first layout is committed a few frames after mount; wait for it like any tap would. The frame callback is active
+  // (keeps the ticker alive) only while the one-shot focus is pending.
+  const [focusPending, setFocusPending] = createSignal(props.autoFocus === true);
+  let focusFrames = 0;
+  onFrame(() => {
+    if (!focusPending() || ++focusFrames < 6) return;
+    setFocusPending(false);
+    if (!unmounted && !opened && routeActive()) open();
+  }, { active: focusPending });
 
   return (
     <Focusable

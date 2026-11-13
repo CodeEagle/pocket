@@ -1985,6 +1985,13 @@ class _PocketViewState extends State<PocketView>
           'An injected runtime must enforce the requested memory limits at creation',
         );
       }
+      // Host font metrics first: a recording locks its font snapshot with the first recorded transaction, and compositor,
+      // offload, worker and auxiliary configuration are transactions. Syncing after them would be deferred until the
+      // recording finishes, and a bytecode package that needs native text layout could not load.
+      syncPocketHostFonts(
+        runtime,
+        fontFamilyFallback: widget.fontFamilyFallback,
+      );
       if (widget.compositorSurfaces.isNotEmpty) {
         if (runtime is! PocketCompositorRuntime) {
           throw UnsupportedError(
@@ -2044,10 +2051,6 @@ class _PocketViewState extends State<PocketView>
           auxiliaryViewport.height,
         );
       }
-      syncPocketHostFonts(
-        runtime,
-        fontFamilyFallback: widget.fontFamilyFallback,
-      );
       final implicitBytecode =
           widget.bytecodeAsset == null &&
           widget.bytecodeBytes == null &&

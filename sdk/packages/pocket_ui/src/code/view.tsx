@@ -98,6 +98,12 @@ export interface CodeViewProps {
   platform?: Platform;
   /** Called for every clipboard/find/save intent; return false to skip the built-in handling. */
   onIntent?: (intent: EditorIntent) => boolean | void;
+  /**
+   * Offered every key-down of the main text area before the editor handles it. `owned` is true when the editor's own keymap
+   * maps the key (Cmd+S, Cmd+F, Esc, arrows ...). Return true to consume the key; the editor then never sees it. An app shell
+   * uses this for its global shortcuts without taking editor-scoped keys away (see studio/docs/ARCHITECTURE.md, keymap).
+   */
+  onKeyDown?: (key: string, owned: boolean) => boolean | void;
   onCursorChange?: (c: { line: number; column: number; offset: number; anchor: number; selections: number }) => void;
   /** A host bridge (clipboard.readText/writeText) or a ready client. Without one an internal clipboard is used. */
   host?: HostBridge;
@@ -416,6 +422,7 @@ export function CodeView(props: CodeViewProps): JSX.Element {
     if (ev.kind === "keyDown") {
       const k = parseKey(ev.key);
       const id = lookupKey(ev.key, platform());
+      if (props.onKeyDown?.(ev.key, id !== null) === true) return;
       if (k.key === "Escape") { closeFind(); restartBlink(); return; }
       if (k.key === "Enter" && !k.control && !k.meta && !k.alt) {
         if (f === "query") { if (k.shift) find.prev(); else find.next(); } else find.replaceOne();
@@ -446,6 +453,7 @@ export function CodeView(props: CodeViewProps): JSX.Element {
     if (ev.kind === "keyUp") return;
     if (ev.kind === "keyDown") {
       const pk = parseKey(ev.key);
+      if (props.onKeyDown?.(ev.key, lookupKey(ev.key, platform()) !== null) === true) return;
       if (pk.key === "Escape" && findOpen() && editor.selection.ranges.length === 1) { closeFind(); return; }
       if (props.readOnly) { const id = lookupKey(ev.key, platform()); if (!id || !READONLY_OK.test(id)) return; }
     } else if (props.readOnly) return;
