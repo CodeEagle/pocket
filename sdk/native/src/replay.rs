@@ -640,15 +640,9 @@ pub(super) fn settle_host_text_advance<F: FnOnce() -> f32>(
     }
 }
 
-pub(super) fn record_host_text_measure_failure(
-    lane: &Rc<RefCell<ScalarLane>>,
-    error: String,
-) {
+pub(super) fn record_host_text_measure_failure(lane: &Rc<RefCell<ScalarLane>>, error: String) {
     let mut borrowed = lane.borrow_mut();
-    if borrowed.mode == Mode::Record
-        && borrowed.transaction_open
-        && borrowed.failure.is_none()
-    {
+    if borrowed.mode == Mode::Record && borrowed.transaction_open && borrowed.failure.is_none() {
         borrowed.failure = Some(error);
     }
 }
@@ -782,8 +776,7 @@ mod tests {
     fn host_text_advance_trace_values_must_fit_the_native_f32_contract() {
         let max_f32 = f32::MAX as f64;
         assert!(validate_scalar("hostTextAdvance".to_owned(), max_f32).is_ok());
-        let too_large = validate_scalar("hostTextAdvance".to_owned(), max_f32 * 2.0)
-            .unwrap_err();
+        let too_large = validate_scalar("hostTextAdvance".to_owned(), max_f32 * 2.0).unwrap_err();
         assert!(too_large.contains("finite f32"), "error={too_large}");
 
         let input = r#"{"idleMs":[],"scalars":[{"kind":"hostTextAdvance","value":1e300}]}"#;

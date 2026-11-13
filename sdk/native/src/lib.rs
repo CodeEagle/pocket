@@ -5564,28 +5564,28 @@ impl TextMetrics {
         };
         if self.uses_host_native_metrics() {
             if let Some(ref host) = self.host_table {
-                if (slot as usize) < HOST_FONT_SLOTS {
-                    let mut max_width = 0.0_f32;
-                    let mut lines = 0.0_f32;
-                    for line in text.split('\n') {
-                        lines += 1.0;
-                        max_width =
-                            max_width.max(self.measure_host_line(host, line, slot, tracking));
+                    if (slot as usize) < HOST_FONT_SLOTS {
+                        let mut max_width = 0.0_f32;
+                        let mut lines = 0.0_f32;
+                        for line in text.split('\n') {
+                            lines += 1.0;
+                            max_width =
+                                max_width.max(self.measure_host_line(host, line, slot, tracking));
+                        }
+                        let measured_height = lines * line_height;
+                        if max_width.is_finite() && measured_height.is_finite() {
+                            return (max_width, measured_height);
+                        }
+                        if let Some(lane) = &self.trace_lane {
+                            replay::record_host_text_measure_failure(
+                                lane,
+                                "host-native text measurement exceeded finite f32 range".to_owned(),
+                            );
+                        }
+                        // The trace lane reports the invalid measurement at transaction
+                        // end. Keep infinity out of Core layout and the frame payload.
+                        return (0.0, 0.0);
                     }
-                    let measured_height = lines * line_height;
-                    if max_width.is_finite() && measured_height.is_finite() {
-                        return (max_width, measured_height);
-                    }
-                    if let Some(lane) = &self.trace_lane {
-                        replay::record_host_text_measure_failure(
-                            lane,
-                            "host-native text measurement exceeded finite f32 range".to_owned(),
-                        );
-                    }
-                    // The trace lane reports the invalid measurement at transaction
-                    // end. Keep infinity out of Core layout and the frame payload.
-                    return (0.0, 0.0);
-                }
             }
         }
         let font = self.font(slot);

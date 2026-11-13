@@ -1115,10 +1115,17 @@ impl WorkerTrace {
             }
             if let Some(actual) = actual {
                 if expected.data != actual {
-                    let message = format!(
-                        "worker replay event {} ({kind}) data mismatch",
-                        expected.seq
-                    );
+                    let message = if kind == "worker.exit" {
+                        format!(
+                            "worker replay event {} ({kind}) data mismatch: expected {}, got {}",
+                            expected.seq, expected.data, actual
+                        )
+                    } else {
+                        format!(
+                            "worker replay event {} ({kind}) data mismatch",
+                            expected.seq
+                        )
+                    };
                     state.failure = Some(message.clone());
                     self.changed.notify_all();
                     return Err(message);

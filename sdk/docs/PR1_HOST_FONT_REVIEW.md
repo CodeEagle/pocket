@@ -50,6 +50,12 @@ atlases. The default Flutter host path uses OS metrics and vector text.
   and the pinned official Hiyori resource tree, then shares that real bundle
   with Flutter asset tests. Reuse the mini-app builder; do not add placeholder
   bytecode, commit generated assets, or download the Cubism Core runtime.
+- Linux concurrency exposed a Worker replay stop window: a turn admitted by
+  the C runner could precede `turn.begin`, and the runner could exit after the
+  stop event was consumed but before the host atomic flag was stored. Use the
+  trace mutex's stop fact, admit only the next recorded turn once, and require
+  an exact `worker.exit` frontier. Deterministic barriers cover both windows;
+  do not skip recorded events or serialize the native test suite to hide them.
 
 ## Validation
 

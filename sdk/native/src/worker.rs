@@ -827,8 +827,11 @@ struct RunnerLifecycle {
 struct BeforeStepTestHook {
     trace_id: usize,
     armed: AtomicBool,
+    hold_after_stop: AtomicBool,
     reached: (Mutex<bool>, Condvar),
     released: (Mutex<bool>, Condvar),
+    stop_reached: (Mutex<bool>, Condvar),
+    stop_released: (Mutex<bool>, Condvar),
 }
 
 #[cfg(test)]
@@ -892,6 +895,39 @@ fn release_before_step_test_hook(state: &WorkerState) {
     let (lock, cv) = &hook.released;
     *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
     cv.notify_all();
+}
+
+#[cfg(test)]
+fn pause_after_stop_consumed_for_test(state: &WorkerState) {
+    let Some(trace_id) = state
+        .trace
+        .as_ref()
+        .map(|trace| Arc::as_ptr(trace) as usize)
+    else {
+        return;
+    };
+    let hook = before_step_test_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let Some(hook) = hook.filter(|hook| hook.trace_id == trace_id) else {
+        return;
+    };
+    if !hook.hold_after_stop.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let (lock, cv) = &hook.stop_reached;
+    *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+    cv.notify_all();
+    let (lock, cv) = &hook.stop_released;
+    let mut released = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !*released && Instant::now() < deadline {
+        released = cv
+            .wait_timeout(released, deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_else(|poison| poison.into_inner())
+            .0;
+    }
 }
 
 struct WorkerState {
@@ -1370,6 +1406,8 @@ impl WorkerRuntime {
                 }
             }
         }
+        #[cfg(test)]
+        pause_after_stop_consumed_for_test(&self.state);
         let drain_replay_turn = self.state.trace.as_ref().is_some_and(|trace| {
             trace.mode() == Mode::Replay
                 && self.state.session.as_ref().is_some_and(|session| {
@@ -3039,11 +3077,18 @@ fn owner_thread(state: Arc<WorkerState>, bytecode: Vec<u8>) {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(worker_error(runner));
     }
+    let stopped = state.stop_requested.load(Ordering::Acquire)
+        || state.trace.as_ref().is_some_and(|trace| {
+            state
+                .session
+                .as_ref()
+                .is_some_and(|session| trace.session_stopped(session))
+        });
     trace_worker_exit(
         &state,
         if failed {
             "faulted"
-        } else if state.stop_requested.load(Ordering::Acquire) {
+        } else if stopped {
             "stopped"
         } else {
             "returned"
@@ -4100,8 +4145,11 @@ mod tests {
             let hook = Arc::new(BeforeStepTestHook {
                 trace_id: Arc::as_ptr(trace) as usize,
                 armed: AtomicBool::new(true),
+                hold_after_stop: AtomicBool::new(false),
                 reached: (Mutex::new(false), Condvar::new()),
                 released: (Mutex::new(false), Condvar::new()),
+                stop_reached: (Mutex::new(false), Condvar::new()),
+                stop_released: (Mutex::new(false), Condvar::new()),
             });
             *before_step_test_hook()
                 .lock()
@@ -4128,13 +4176,48 @@ mod tests {
             }
             true
         }
+
+        fn hold_stop_consumed(&self) {
+            self.hook.hold_after_stop.store(true, Ordering::Release);
+        }
+
+        fn wait_until_stop_consumed(&self) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (lock, cv) = &self.hook.stop_reached;
+            let mut reached = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+            while !*reached {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                let (next, result) = cv
+                    .wait_timeout(reached, deadline - now)
+                    .unwrap_or_else(|poison| poison.into_inner());
+                reached = next;
+                if result.timed_out() && !*reached {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn release_step(&self) {
+            let (lock, cv) = &self.hook.released;
+            *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+            cv.notify_all();
+        }
+
+        fn release_stop(&self) {
+            let (lock, cv) = &self.hook.stop_released;
+            *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+            cv.notify_all();
+        }
     }
 
     impl Drop for BeforeStepBarrierGuard {
         fn drop(&mut self) {
-            let (lock, cv) = &self.hook.released;
-            *lock.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
-            cv.notify_all();
+            self.release_step();
+            self.release_stop();
             let mut installed = before_step_test_hook()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -4245,10 +4328,17 @@ mod tests {
         ]);
         let no_turn_tape = resequence(vec![bootstrap, scheduler_stop, worker_exit]);
 
-        for (tape, expected_turns) in [(admitted_tape, 1usize), (no_turn_tape, 0usize)] {
+        for (tape, expected_turns, hold_stop_store) in [
+            (admitted_tape, 1usize, false),
+            (no_turn_tape.clone(), 0usize, false),
+            (no_turn_tape, 0usize, true),
+        ] {
             let replay = WorkerTrace::new(Mode::Replay);
             replay.begin_batch(&tape).unwrap();
             let replay_barrier = BeforeStepBarrierGuard::install(&replay);
+            if hold_stop_store {
+                replay_barrier.hold_stop_consumed();
+            }
             let mut runtime = stop_boundary_worker(&bytecode, Arc::clone(&replay), session);
             runtime.wait_ready(Duration::from_secs(2)).unwrap();
             assert!(
@@ -4256,7 +4346,40 @@ mod tests {
                 "Replay Worker did not reach the controlled step boundary: error={:?}",
                 runtime.last_error()
             );
-            runtime.request_stop_and_wait();
+            if hold_stop_store {
+                let state = Arc::clone(&runtime.state);
+                let stop_thread = thread::spawn(move || {
+                    runtime.request_stop_and_wait();
+                    runtime
+                });
+                assert!(
+                    replay_barrier.wait_until_stop_consumed(),
+                    "Host did not reach the scheduler.stop / AtomicBool race window"
+                );
+                assert!(!state.stop_requested.load(Ordering::Acquire));
+                replay_barrier.release_step();
+                let (lock, cv) = &state.lifecycle;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut lifecycle = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                while !lifecycle.exited {
+                    let now = Instant::now();
+                    assert!(
+                        now < deadline,
+                        "Worker did not exit while Host stop store was held"
+                    );
+                    let (next, result) = cv
+                        .wait_timeout(lifecycle, deadline - now)
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    lifecycle = next;
+                    assert!(!result.timed_out() || lifecycle.exited);
+                }
+                assert!(!state.stop_requested.load(Ordering::Acquire));
+                drop(lifecycle);
+                replay_barrier.release_stop();
+                runtime = stop_thread.join().unwrap();
+            } else {
+                runtime.request_stop_and_wait();
+            }
             runtime.destroy_and_join().unwrap();
             assert_eq!(runtime.last_error(), None);
             drop(replay_barrier);
