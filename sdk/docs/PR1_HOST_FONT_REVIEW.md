@@ -104,6 +104,23 @@ tree, excluding tests/caches, as `export_web_sdk.ts` does. Its controlled server
 entry still exercises the real detached `editor_service.mjs` upgrade and
 rollback flow. This removes a manual import list that omitted the new
 `update_endpoint.ts`; the production exporter already included that module.
-The release command passed all 24 tests and 138 assertions on macOS with
-Playwright Chromium and Bun 1.4.4. The same group is now included in Linux CI
+Linux execution then exposed a real retirement bug: `detached: true` creates
+a new session but does not remove the updater from the old server's process
+ancestry. Recursive retirement could signal the updater before the old server,
+leaving the persisted upgrade in `applying`. Reuse the existing Windows
+`protectedRetirementPlan` on every platform, retire other Worker subtrees,
+and signal the ancestor chain without signaling the updater. If the updater
+was already reparented, require a complete ancestry chain outside the target
+before recursive retirement. This adds no second service state machine.
+The retained parent has no standalone SDK upgrade manager to migrate; this is
+an adaptation of the existing SDK service boundary.
+
+A real Node process-tree regression verifies that a detached updater still
+has the server as its parent, survives retirement, and leaves both the old
+server and its other Worker stopped. Browser tests wait for the observable
+dirty-draft deferral before asserting it; failed fixtures retain logs, process
+facts and persisted upgrade status before cleanup.
+
+The release command passed all 26 tests and 148 assertions on macOS with
+Playwright Chromium and Bun 1.4.4. The same group is included in Linux CI
 before packaging. SDK version 0.1.14 supersedes the unpublished 0.1.13 candidate.
