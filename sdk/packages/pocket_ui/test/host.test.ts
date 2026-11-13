@@ -225,7 +225,9 @@ test("app open and prewarm extend only their own deadline on a shared bridge", a
     const launch = await platform.launchApp("example.remote");
     const result = launch.result.catch(() => {});
     await platform.listApps();
-    assert.deepEqual(deadlines, [5400, 5400, 2]);
+    // Prewarm keeps its 90-second budget; app open uses 210 seconds so the
+    // host can reserve 180 seconds for preparation and cleanup.
+    assert.deepEqual(deadlines, [5400, 12600, 2]);
     platform.dispose(); await result;
   } finally { platform.dispose(); bridge.dispose(); }
 });
