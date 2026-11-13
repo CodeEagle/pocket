@@ -30,4 +30,4 @@ echo "test_guest: native settings and preference restore (required)"
 bun tests/settings_native.test.ts
 
 echo "test_guest: native route lifetime and state retention (required)"
-bun test tests/navigation_native.test.ts
+bun test tests/navigation_native.test.ts tests/mini_app_updates_native.test.ts
