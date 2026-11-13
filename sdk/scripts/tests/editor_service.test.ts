@@ -390,6 +390,53 @@ test("upgrade retirement kills the real server tree but preserves its detached u
 });
 
 
+test("upgrade retirement refuses TERM when the live PID no longer matches its snapshot", { timeout: 10_000 }, async () => {
+  const child = spawn(process.execPath, [
+    "-e",
+    "process.on('SIGTERM', () => process.exit(17)); process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  const pid = child.pid!;
+
+  try {
+    await new Promise<void>((resolveReady, rejectReady) => {
+      const timer = setTimeout(() => rejectReady(new Error("child did not become ready")), 3_000);
+      child.once("error", error => {
+        clearTimeout(timer);
+        rejectReady(error);
+      });
+      child.once("exit", code => {
+        clearTimeout(timer);
+        rejectReady(new Error(`child exited before ready (${code})`));
+      });
+      child.stdout.setEncoding("utf8");
+      child.stdout.once("data", () => {
+        clearTimeout(timer);
+        resolveReady();
+      });
+    });
+
+    const found = await findProcess("pid", pid);
+    const snapshot = Array.isArray(found) ? found.find(info => Number(info?.pid) === pid) : undefined;
+    expect(snapshot?.cmd).toBeTruthy();
+    await expect(terminateProcessSet([{
+      ...snapshot!,
+      cmd: `${snapshot!.cmd} changed-after-snapshot`,
+    }], { timeoutMs: 50, killTimeoutMs: 50 })).rejects.toThrow(/拒绝发送 SIGTERM/);
+
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 75));
+    let alive = true;
+    try { process.kill(pid, 0); }
+    catch (error) { if (error.code === "ESRCH") alive = false; }
+    expect(alive).toBe(true);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>(resolveExit => child.once("exit", () => resolveExit()));
+    }
+  }
+});
+
+
 test("service ownership resolves aliased command paths and rejects unrelated files", () => {
   const root = mkdtempSync(join(tmpdir(), "pocket-command-path-"));
   try {

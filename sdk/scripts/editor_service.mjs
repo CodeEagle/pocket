@@ -341,10 +341,30 @@ function sameProcessSnapshotIdentity(expected, current) {
   const currentBin = String(current?.bin || "").trim();
   const expectedName = String(expected?.name || "").trim();
   const currentName = String(current?.name || "").trim();
-  if (expectedCommand && currentCommand && expectedCommand !== currentCommand) return false;
-  if (expectedBin && currentBin && normalized(expectedBin) !== normalized(currentBin)) return false;
+  if (expectedCommand && (!currentCommand || expectedCommand !== currentCommand)) return false;
+  if (expectedBin && (!currentBin || normalized(expectedBin) !== normalized(currentBin))) return false;
   if (expectedName && currentName && normalized(expectedName) !== normalized(currentName)) return false;
   return Boolean((expectedCommand && currentCommand) || (expectedBin && currentBin));
+}
+
+async function signalVerifiedProcess(expected, signal, validateCurrent) {
+  const pid = Number(expected?.pid);
+  if (!processIsRunning(pid)) return false;
+
+  const found = await findProcess("pid", pid);
+  const current = Array.isArray(found) ? found.find(entry => Number(entry?.pid) === pid) : undefined;
+  if (!current) {
+    if (!processIsRunning(pid)) return false;
+  } else if (sameProcessSnapshotIdentity(expected, current) && validateCurrent(expected, current)) {
+    signalProcess(pid, signal);
+    return true;
+  }
+
+  const currentPpid = Number(current?.ppid);
+  throw new Error(
+    `拒绝发送 ${signal} 给进程 ${pid}：无法确认其仍是初始快照中的目标 `
+    + JSON.stringify({ expected: { pid, ppid: Number(expected.ppid) }, current: { pid: current ? Number(current.pid) : null, ppid: Number.isInteger(currentPpid) ? currentPpid : null } }),
+  );
 }
 
 async function terminateProcessSet(processes, options = {}) {
@@ -359,25 +379,10 @@ async function terminateProcessSet(processes, options = {}) {
   }
   const entries = [...unique.values()];
   const pids = entries.map(info => Number(info.pid));
-  for (const pid of pids) signalProcess(pid, "SIGTERM");
+  for (const info of entries) await signalVerifiedProcess(info, "SIGTERM", validateCurrent);
   if (await waitProcessesGone(pids, timeoutMs)) return true;
 
-  const remaining = [];
-  for (const info of entries) {
-    const pid = Number(info.pid);
-    if (!processIsRunning(pid)) continue;
-    const found = await findProcess("pid", pid);
-    const current = Array.isArray(found) ? found.find(entry => Number(entry?.pid) === pid) : undefined;
-    if (!current || !sameProcessSnapshotIdentity(info, current) || !validateCurrent(info, current)) {
-      const currentPpid = Number(current?.ppid);
-      throw new Error(
-        `拒绝强制停止进程 ${pid}：无法确认其仍是初始快照中的目标 `
-        + JSON.stringify({ expected: { pid, ppid: Number(info.ppid) }, current: { pid: current ? Number(current.pid) : null, ppid: Number.isInteger(currentPpid) ? currentPpid : null } }),
-      );
-    }
-    remaining.push(pid);
-  }
-  for (const pid of remaining) signalProcess(pid, "SIGKILL");
+  for (const info of entries) await signalVerifiedProcess(info, "SIGKILL", validateCurrent);
   return waitProcessesGone(pids, killTimeoutMs);
 }
 
