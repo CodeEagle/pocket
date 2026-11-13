@@ -128,13 +128,25 @@ final class PocketStudioPlugin extends PocketPlugin {
     if (!text) {
       return <String, Object?>{'name': name, 'bytes': bytes.length, 'encoding': 'binary'};
     }
-    final cut = bytes.length > 128 * 1024 ? 128 * 1024 : bytes.length;
+    const limit = 128 * 1024;
+    var view = bytes;
+    if (name.endsWith('.json') && bytes.length > limit) {
+      // Pretty-printed snapshots (resources.json) carry mostly whitespace: re-encode compactly so the guest
+      // can still parse the whole document. `bytes` stays the artifact's real size.
+      try {
+        final compact = utf8.encode(jsonEncode(jsonDecode(utf8.decode(bytes))));
+        if (compact.length <= limit) view = compact;
+      } on FormatException {
+        // not valid JSON: fall through to the byte cut
+      }
+    }
+    final cut = view.length > limit ? limit : view.length;
     return <String, Object?>{
       'name': name,
       'bytes': bytes.length,
       'encoding': 'utf8',
-      'truncated': cut < bytes.length,
-      'data': scrubber.scrubString(utf8.decode(bytes.sublist(0, cut), allowMalformed: true)),
+      'truncated': cut < view.length,
+      'data': scrubber.scrubString(utf8.decode(view.sublist(0, cut), allowMalformed: true)),
     };
   }
 
@@ -157,6 +169,24 @@ final class PocketStudioPlugin extends PocketPlugin {
           'builtRevision': map['builtRevision'],
           'artifacts': map['artifacts'],
         };
+      case 'studio.publish.publish':
+        // The signed envelope carries the whole base64 payload (every blob URL), which can exceed the 256 KiB
+        // result quota for large projects and would fail an already completed publish. Keep the public
+        // identity (keyId, signature, size) and drop the payload body; the signed bytes are served at
+        // `manifestUrl` for anything that needs them.
+        if (json is Map && json['manifest'] is Map) {
+          final manifest = json['manifest'] as Map;
+          final payload = manifest['payload'];
+          return <String, Object?>{
+            ...json.cast<String, Object?>(),
+            'manifest': <String, Object?>{
+              for (final e in manifest.entries)
+                if (e.key != 'payload') '${e.key}': e.value,
+              if (payload is String) 'payloadBase64Bytes': payload.length,
+            },
+          };
+        }
+        return json;
       case 'studio.service.health':
         final map = json is Map ? json : const <String, Object?>{};
         return <String, Object?>{

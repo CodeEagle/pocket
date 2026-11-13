@@ -1677,7 +1677,7 @@ function queueBuild(
 async function readArtifact(workspace: Workspace, id: string, file: string, state: EditorState): Promise<Uint8Array | undefined> {
   if (!state.artifacts || state.builtRevision === null) return undefined;
   const name = basename(file);
-  const allowed = new Set(["app.js", "app.qjbc", "app.bytecode.json", "app.pak", "guest-manifest.json", "build.json", "app.worker.qjbc", "app.worker.bytecode.json"]);
+  const allowed = new Set(["app.js", "app.qjbc", "app.bytecode.json", "app.pak", "guest-manifest.json", "build.json", RESOURCE_SNAPSHOT_FILE, "app.worker.qjbc", "app.worker.bytecode.json"]);
   if (!allowed.has(name)) return undefined;
   let path: string;
   try {

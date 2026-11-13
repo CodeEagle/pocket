@@ -10,6 +10,9 @@
 /// 3. Any other absolute path under a well-known system top level directory
 ///    (or a Windows drive path, or a `file://` URI) becomes `<path>/<last>`.
 /// 4. The CSRF token value is replaced by `<redacted>` wherever it appears.
+/// 5. Signing key material never reaches the guest: keys named like a private key / seed are dropped at any
+///    depth and PEM or OpenSSH private-key blocks inside any string become `<redacted-key>`. The service
+///    does not return such fields (keys stay in its workspace); this is the provider-side backstop.
 final class StudioPathScrubber {
   StudioPathScrubber({Iterable<MapEntry<String, String>> roots = const []}) {
     for (final root in roots) {
@@ -24,7 +27,20 @@ final class StudioPathScrubber {
     'sdkRoot',
     'csrfToken',
     'absolutePath',
+    // Signing material (rule 5).
+    'privateKey',
+    'private_key',
+    'privateKeyPem',
+    'privateKeyBase64',
+    'secretKey',
+    'signingKey',
+    'signingSeed',
+    'seed',
   };
+
+  static final RegExp _privateKeyBlock = RegExp(
+    r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)',
+  );
 
   static final RegExp _fileUri = RegExp(r'file://(?:localhost)?/[^\s"' "'" r'`<>|;,()\[\]{}\\]*');
   static final RegExp _posix = RegExp(
@@ -63,7 +79,7 @@ final class StudioPathScrubber {
   }
 
   String scrubString(String input) {
-    var text = input;
+    var text = input.replaceAll(_privateKeyBlock, '<redacted-key>');
     for (final secret in _secrets) {
       text = text.replaceAll(secret, '<redacted>');
     }

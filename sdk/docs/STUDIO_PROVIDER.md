@@ -31,7 +31,16 @@ could be inspected. Reused from this repository:
 | `PocketAppConfig.rawTextInputEnabled` (field, `copyWith`, `withNativePolicy`, equality, `PocketApp` pass-through) | `PocketView.rawTextInputEnabled` existed (`STUDIO_TEXT_INPUT.md` D) but no consumer could enable it through the SDK config; the Studio host needs it for the M4 editor. Default `false`, additive. Test: `test/pocket_config_test.dart` |
 | `check_architecture.py`: `studio/` rules | thin host, no extra Dart in `studio/lib`, no JS source in assets, SDK must not import `studio/`, studio must not import `demo/`, macOS-only |
 
-No change to `sdk/editor/server.ts`.
+M5 (publish and inspect) changes, each evidenced by the Studio pages that needed them:
+
+| Change | Why |
+| --- | --- |
+| `sdk/editor/server.ts` `readArtifact`: `resources.json` joins the artifact allow-list (read-only, same guards) | the pack contents summary needs the build's resource snapshot (key, kind, bytes, placement per resource); the `.pak` itself is binary and metadata-only. Test: `editor/test/editor_server.test.ts` |
+| Provider: `resources.json` in `pocketStudioArtifactNames`; oversized pretty-printed JSON artifacts are re-encoded compactly before the 128 KiB cut (`bytes` stays the real size) | the snapshot of a larger project would otherwise be truncated and unparseable |
+| Provider: `studio.publish.publish` drops the signed envelope's base64 `payload` (keeps `keyId`, `signature`, `payloadBase64Bytes`) | the payload lists every blob and can exceed the 256 KiB result quota for large projects, which would report a failure for a publish that already happened; the signed bytes are served at `manifestUrl` |
+| Provider scrubber rule 5: key-like JSON fields (`privateKey`, `private_key`, `privateKeyPem`, `privateKeyBase64`, `secretKey`, `signingKey`, `signingSeed`, `seed`) are dropped and PEM/OpenSSH private-key blocks in any string become `<redacted-key>` | keys stay in the service (`keys/editor-dev-key.json` is never served); this is a provider-side backstop. Tests: `studio_plugin_test.dart` (all publish routes, errors, artifacts), `real_service_test.dart` (real publish, no field of the real key file in any result) |
+
+Otherwise no service change: plan, publish, history, offline, artifacts.list/inspect all map onto existing routes.
 
 ## What the provider does (and nothing more)
 
@@ -72,5 +81,6 @@ delete, error mapping, a real `fs.watch` change event. A skip is not evidence: t
 - The preview child's public key is read from the trusted workspace after the service's first preview publish;
   catalog refresh and bootstrap metadata are M3.
 - Streams reopen on `plugin_stream_quota` (10000 items) or server-side slow-consumer drops; the guest owns that.
-- Artifacts: binary artifacts return metadata only.
+- Artifacts: binary artifacts return metadata only; text artifacts are cut at 128 KiB (`truncated: true`).
+- Version history has no trial/promoted/rolled-back state: the service journal records publications and slot pointers only; those states live in each device's update coordinator.
 - Not run here: the macOS app, IME, window compositing (Linux container).

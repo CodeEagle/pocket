@@ -192,6 +192,12 @@ test("editor service creates, edits, builds, and publishes a signed qjbc project
     const workerMeta = await request(server, "/api/projects/fixture-app/artifacts/app.worker.bytecode.json");
     expect(workerMeta.response.status).toBe(200);
     expect(workerMeta.value.runtimeAbi).toBe("fixture-abi-v1");
+    // The resource snapshot (pak contents: key, kind, bytes, placement) is a read-only artifact the Studio inspects.
+    const resourceSnapshot = await request(server, "/api/projects/fixture-app/artifacts/resources.json");
+    expect(resourceSnapshot.response.status).toBe(200);
+    expect(Array.isArray(resourceSnapshot.value.packages)).toBe(true);
+    expect(resourceSnapshot.value.packages[0].id).toBe("pocket.host.demo");
+    expect(JSON.stringify(resourceSnapshot.value)).not.toContain(workspace);
     const rejectedArtifact = await request(server, "/api/projects/fixture-app/artifacts/not-allowed.txt");
     expect(rejectedArtifact.response.status).toBe(404);
     rmSync(join(buildRevDir, "app.worker.qjbc"));

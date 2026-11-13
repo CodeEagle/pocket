@@ -148,4 +148,58 @@ void main() {
     final status = await call('studio.build.status', {'project': 'studio-real'});
     expect(jsonEncode(status), isNot(contains(work.path)));
   }, skip: skip, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('signed test publish through the provider: plan, publish, history, offline, artifacts, and no key material', () async {
+    await call('studio.build.start', {'project': 'studio-real'});
+    Map status = {};
+    for (var i = 0; i < 300; i++) {
+      status = await call('studio.build.status', {'project': 'studio-real'});
+      if (status['busy'] != true && status['builtRevision'] != null) break;
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    expect(status['error'], isNull, reason: '${status['logs']}');
+    expect(status['builtRevision'], status['revision']);
+
+    final plan = await call('studio.publish.plan', {'project': 'studio-real', 'channel': 'test'});
+    final root = (plan['targets'] as List).first as Map;
+    expect(root['kind'], 'root');
+    expect(root['canPublish'], isTrue);
+    final published = await call('studio.publish.publish', {'project': 'studio-real', 'channel': 'test'});
+    final publish = (published['status'] as Map)['publish'] as Map;
+    expect(publish['channel'], 'test');
+    expect(publish['keyId'], isNotEmpty);
+    expect(publish['payloadSha256'], hasLength(64));
+    expect(published['manifestUrl'], contains('/test/pocket/'));
+    expect((published['manifest'] as Map).containsKey('payload'), isFalse);
+    final history = await call('studio.publish.history', {'project': 'studio-real'});
+    final slots = (history['slots'] as List).cast<Map>();
+    expect(slots.firstWhere((slot) => slot['name'] == 'test')['version'], publish['version']);
+    expect((history['history'] as List), isNotEmpty);
+    final offline = await call('studio.publish.offline', {'project': 'studio-real'});
+    expect(offline['archiveUrl'], startsWith('/releases/studio-real/'));
+    final list = await call('studio.artifacts.list', {'project': 'studio-real'});
+    expect((list['artifacts'] as Map)['bytecode'], contains('app.qjbc'));
+    final inspected = <Object?>[
+      for (final name in const ['app.bytecode.json', 'guest-manifest.json', 'build.json', 'resources.json', 'app.qjbc', 'app.pak'])
+        await call('studio.artifacts.inspect', {'project': 'studio-real', 'name': name}),
+    ];
+    expect((inspected[0] as Map)['data'], contains('runtimeAbi'));
+    expect((inspected[3] as Map)['data'], contains('packages'));
+    expect((inspected[4] as Map).containsKey('data'), isFalse);
+
+    // Keys stay in the service: no field of the key file other than the public ones appears in any result.
+    final keyFile = File('${work.path}/ws/keys/editor-dev-key.json');
+    expect(keyFile.existsSync(), isTrue);
+    final key = jsonDecode(keyFile.readAsStringSync()) as Map;
+    final secrets = <String>[
+      for (final entry in key.entries)
+        if (!const {'keyId', 'publicKeyBase64', 'algorithm', 'createdAt'}.contains(entry.key) && entry.value is String && (entry.value as String).length >= 16) entry.value as String,
+    ];
+    expect(secrets, isNotEmpty, reason: 'the key file must hold private material for this check to mean anything: ${key.keys}');
+    final everything = jsonEncode([plan, published, history, offline, list, inspected, status, await call('studio.build.status', {'project': 'studio-real'})]);
+    for (final secret in secrets) {
+      expect(everything, isNot(contains(secret)));
+    }
+    expect(everything, isNot(contains(work.path)));
+  }, skip: skip, timeout: const Timeout(Duration(minutes: 3)));
 }

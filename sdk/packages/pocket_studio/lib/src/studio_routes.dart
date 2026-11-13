@@ -107,7 +107,7 @@ int _base64RawLength(String data) {
 
 const Set<String> pocketStudioArtifactNames = <String>{
   'app.js', 'app.qjbc', 'app.bytecode.json', 'app.pak', 'guest-manifest.json',
-  'build.json', 'app.worker.qjbc', 'app.worker.bytecode.json',
+  'build.json', 'resources.json', 'app.worker.qjbc', 'app.worker.bytecode.json',
 };
 
 Map<String, PocketPluginSchema> _p({Map<String, PocketPluginSchema> extra = const {}, bool project = true}) =>

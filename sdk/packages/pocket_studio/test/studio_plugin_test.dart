@@ -127,6 +127,59 @@ void main() {
       expect(binary.containsKey('data'), isFalse);
       expect((await failure('studio.artifacts.inspect', {'project': 'demo', 'name': '../x'})).code, 'invalid_params');
     });
+
+    test('artifact inspect re-encodes an oversized pretty JSON snapshot so the guest can parse it', () async {
+      final resources = <Map<String, Object?>>[
+        for (var i = 0; i < 900; i++) {'key': 'asset:assets/img-$i.png', 'kind': 'asset', 'bytes': i, 'placement': 'pak'},
+      ];
+      final pretty = const JsonEncoder.withIndent('      ').convert({'version': 1, 'packages': [{'id': 'pocket.demo', 'resources': resources}]});
+      expect(pretty.length, greaterThan(128 * 1024));
+      service.handler = (r) async => FakeReply(200, null, raw: utf8.encode(pretty), contentType: 'application/json');
+      final result = await call('studio.artifacts.inspect', {'project': 'demo', 'name': 'resources.json'}) as Map;
+      expect(result['bytes'], pretty.length, reason: 'bytes is the real artifact size');
+      expect(result['truncated'], isFalse);
+      final parsed = jsonDecode(result['data'] as String) as Map;
+      expect(((parsed['packages'] as List).single as Map)['resources'], hasLength(900));
+    });
+
+    test('publish result drops the signed payload body but keeps the public identity', () async {
+      service.handler = (r) async => FakeReply(200, {
+        'status': {'publish': {'keyId': 'k1', 'runtimeAbi': 'abi'}},
+        'manifest': {'keyId': 'k1', 'payload': 'A' * 400000, 'signature': 'sig'},
+        'manifestUrl': 'http://127.0.0.1:1/test/pocket/h/app/latest.json',
+      });
+      final result = await call('studio.publish.publish', {'project': 'demo', 'channel': 'test'}) as Map;
+      expect(result['manifestUrl'], contains('latest.json'));
+      final manifest = result['manifest'] as Map;
+      expect(manifest, {'keyId': 'k1', 'signature': 'sig', 'payloadBase64Bytes': 400000});
+    });
+
+    test('signing key material never reaches the guest, whichever route carries it', () async {
+      const pem = '-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIDsecretsecretsecretsecretsecretsecretsecret\n-----END PRIVATE KEY-----';
+      service.handler = (r) async => FakeReply(200, {
+        'status': {'publish': {'keyId': 'k1'}},
+        'privateKey': 'MC4CAQAwBQYDK2VwBCIEIDsecret',
+        'nested': {'seed': 'abcd', 'secretKey': 'x', 'ok': 'visible', 'note': 'key was $pem done'},
+        'logs': ['signing with $pem'],
+        'publicKey': 'PUBLICKEYBASE64',
+      });
+      for (final capability in ['studio.publish.publish', 'studio.publish.history', 'studio.publish.plan', 'studio.build.status']) {
+        final text = jsonEncode(await call(capability, {'project': 'demo'}));
+        expect(text, isNot(contains('PRIVATE KEY')), reason: capability);
+        expect(text, isNot(contains('secretsecret')), reason: capability);
+        expect(text, isNot(contains('MC4CAQAw')), reason: capability);
+        expect(text, isNot(contains('"seed"')), reason: capability);
+        expect(text, contains('visible'), reason: capability);
+        expect(text, contains('PUBLICKEYBASE64'), reason: 'public keys stay: $capability');
+      }
+      // Error bodies and inspected text artifacts are scrubbed too.
+      service.handler = (r) async => FakeReply(500, {'error': 'sign failed: $pem'});
+      final error = await failure('studio.publish.publish', {'project': 'demo'});
+      expect(error.message, isNot(contains('secretsecret')));
+      service.handler = (r) async => FakeReply(200, null, raw: utf8.encode('{"k":"$pem"}'), contentType: 'application/json');
+      final inspected = await call('studio.artifacts.inspect', {'project': 'demo', 'name': 'build.json'}) as Map;
+      expect(inspected['data'], isNot(contains('secretsecret')));
+    });
   });
 
   group('validation (no request may reach the service)', () {
