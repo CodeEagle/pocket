@@ -3079,6 +3079,33 @@ fn queue_motion(host: &mut HostState, message: &serde_json::Value) -> Result<(),
     Ok(())
 }
 
+// `input.text` key events may carry an optional `modifiers` bitmask
+// (shift=1, control=2, alt=4, meta=8; absent = 0). The pinned PocketJS text
+// event has no modifier field; its documented convention is a held modifier
+// in front of the key name (`Control+z`, `Alt+ArrowLeft`). The host therefore
+// folds the mask into the key in the fixed order Control, Alt, Shift, Meta, so
+// no upstream ABI change is needed. A modifier key never prefixes itself
+// (`Shift` with shift held stays `Shift`).
+const TEXT_MODIFIER_MASK: u64 = 0b1111;
+
+fn key_with_modifiers(key: String, modifiers: u8) -> Result<String, String> {
+    if modifiers == 0 {
+        return Ok(key);
+    }
+    let mut name = String::new();
+    for (bit, label) in [(2u8, "Control"), (4, "Alt"), (1, "Shift"), (8, "Meta")] {
+        if modifiers & bit != 0 && key != label {
+            name.push_str(label);
+            name.push('+');
+        }
+    }
+    name.push_str(&key);
+    if name.len() > 128 {
+        return Err("input.text.key is too long".into());
+    }
+    Ok(name)
+}
+
 // Independent raw text lane for terminal/editor-style guests using
 // onTextEvent. Flutter TextField's textInput.edit remains the sole IME lane
 // for framework TextInput, so those edits must not also enter this queue.
@@ -3109,7 +3136,17 @@ fn queue_text(host: &mut HostState, message: &serde_json::Value) -> Result<(), S
             .ok_or("input.text.kind must be a string")?;
         admitted.push(match kind {
             "keyDown" | "keyUp" => TextEvent::Key {
-                key: string("key", 128)?,
+                key: key_with_modifiers(
+                    string("key", 128)?,
+                    match value.get("modifiers") {
+                        None | Some(serde_json::Value::Null) => 0,
+                        Some(mask) => mask
+                            .as_u64()
+                            .filter(|mask| *mask <= TEXT_MODIFIER_MASK)
+                            .ok_or("input.text.modifiers must be an integer in 0..=15")?
+                            as u8,
+                    },
+                )?,
                 pressed: kind == "keyDown",
                 repeat: value
                     .get("repeat")
@@ -11207,6 +11244,52 @@ mod smoke_tests {
             &serde_json::json!({"params":{"kind":"compositionEnd"}})
         )
         .is_err());
+        unsafe {
+            pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn key_modifiers_fold_into_guest_visible_key_names() {
+        assert_eq!(key_with_modifiers("z".into(), 0).unwrap(), "z");
+        assert_eq!(key_with_modifiers("z".into(), 2).unwrap(), "Control+z");
+        assert_eq!(
+            key_with_modifiers("ArrowLeft".into(), 1 | 4).unwrap(),
+            "Alt+Shift+ArrowLeft"
+        );
+        assert_eq!(
+            key_with_modifiers("s".into(), 1 | 2 | 4 | 8).unwrap(),
+            "Control+Alt+Shift+Meta+s"
+        );
+        assert_eq!(key_with_modifiers("Shift".into(), 1).unwrap(), "Shift");
+        assert_eq!(key_with_modifiers("Shift".into(), 1 | 2).unwrap(), "Control+Shift");
+        assert!(key_with_modifiers("k".repeat(125), 2).is_err());
+
+        let handle = pocket_create(80.0, 80.0);
+        let source = CString::new(r#"globalThis.__pocketEvent=function(){}; globalThis.frame=function(){
+            if (arguments[8].length) pocket._emit(JSON.stringify({method:'text.edge',params:{events:arguments[8]}}));
+        };"#).unwrap();
+        assert_eq!(unsafe { pocket_eval(handle, source.as_ptr()) }, 0);
+        frame_json(handle);
+        let message = CString::new(r#"{"method":"input.text","params":[{"kind":"keyDown","key":"s","modifiers":8},{"kind":"keyDown","key":"ArrowLeft","modifiers":5,"repeat":true},{"kind":"keyUp","key":"ArrowLeft"},{"kind":"keyDown","key":"a","modifiers":null}]}"#).unwrap();
+        assert_eq!(unsafe { pocket_send(handle, message.as_ptr()) }, 0);
+        let pointer = unsafe { pocket_frame(handle, 0.0) };
+        let frame: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+        let events = frame["events"][0]["params"]["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("actual frame: {frame}"));
+        let keys: Vec<_> = events.iter().map(|event| event["text"].as_str().unwrap()).collect();
+        assert_eq!(keys, vec!["Meta+s", "Alt+Shift+ArrowLeft", "ArrowLeft", "a"]);
+        assert_eq!(events[1]["repeat"], true);
+        for bad in [
+            serde_json::json!({"params":{"kind":"keyDown","key":"a","modifiers":16}}),
+            serde_json::json!({"params":{"kind":"keyDown","key":"a","modifiers":-1}}),
+            serde_json::json!({"params":{"kind":"keyDown","key":"a","modifiers":"1"}}),
+        ] {
+            assert!(queue_text(unsafe { &mut *handle }, &bad).is_err());
+        }
+        assert!(unsafe { &*handle }.pending_text.is_empty());
         unsafe {
             pocket_destroy(handle);
         }

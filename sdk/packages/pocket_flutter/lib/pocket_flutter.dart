@@ -13,6 +13,7 @@ export 'src/pocket_performance.dart';
 export 'src/pocket_startup_progress.dart';
 export 'src/pocket_runtime.dart';
 export 'src/pocket_recording.dart';
+export 'src/pocket_raw_text_input.dart';
 export 'src/pocket_text_cache.dart';
 export 'src/pocket_view.dart';
 export 'src/pocket_compositor.dart';

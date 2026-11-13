@@ -24,6 +24,7 @@ import 'pocket_host_fonts.dart';
 import 'pocket_model.dart';
 import 'pocket_package.dart';
 import 'pocket_performance.dart';
+import 'pocket_raw_text_input.dart';
 import 'pocket_startup_progress.dart';
 import 'pocket_recording.dart';
 import 'pocket_memory_limits.dart';
@@ -99,7 +100,14 @@ final class PocketViewController {
       <PocketDuplexEventCallback>{};
   _PocketSceneCaptureCallback? _captureScene;
   bool Function()? _refreshHostFonts;
+  PocketTextLayoutCacheStats Function()? _textLayoutCacheStats;
   bool _sceneCaptureInFlight = false;
+
+  /// Read-only counters of the attached [PocketView]'s text layout cache, or
+  /// null while no view is attached. Intended for profiling (hit rate,
+  /// evictions) when tuning [PocketView.textLayoutCacheCapacity].
+  PocketTextLayoutCacheStats? get textLayoutCacheStats =>
+      _textLayoutCacheStats?.call();
 
   /// Only trusted, compiled host providers can authorize a platform texture.
   /// A downloaded guest cannot render an arbitrary Flutter texture handle.
@@ -245,6 +253,7 @@ final class PocketViewController {
     int? selectionStart,
     int? selectionEnd,
     bool repeat = false,
+    int modifiers = 0,
   }) => send(
     method: 'input.text',
     params: <String, dynamic>{
@@ -252,6 +261,8 @@ final class PocketViewController {
       if (text != null) 'text': text,
       if (key != null) 'key': key,
       if (repeat) 'repeat': true,
+      // Optional bitmask: shift=1, control=2, alt=4, meta=8 (absent = 0).
+      if (modifiers != 0) 'modifiers': modifiers,
       if (selectionStart != null) 'selectionStart': selectionStart,
       if (selectionEnd != null) 'selectionEnd': selectionEnd,
     },
@@ -479,6 +490,7 @@ final class PocketViewController {
     VoidCallback? onAppActiveChanged,
     _PocketSceneCaptureCallback? captureScene,
     bool Function()? refreshHostFonts,
+    PocketTextLayoutCacheStats Function()? textLayoutCacheStats,
   }) {
     _clearPendingMessages();
     _generation++;
@@ -491,6 +503,7 @@ final class PocketViewController {
     _onAppActiveChanged = onAppActiveChanged;
     _captureScene = captureScene;
     _refreshHostFonts = refreshHostFonts;
+    _textLayoutCacheStats = textLayoutCacheStats;
   }
 
   void _detach(PocketRuntime runtime) {
@@ -506,6 +519,7 @@ final class PocketViewController {
       _generation++;
       _captureScene = null;
       _refreshHostFonts = null;
+      _textLayoutCacheStats = null;
       return;
     }
     _generation++;
@@ -518,6 +532,7 @@ final class PocketViewController {
     _onAppActiveChanged = null;
     _captureScene = null;
     _refreshHostFonts = null;
+    _textLayoutCacheStats = null;
     _clearPendingMessages();
   }
 
@@ -563,6 +578,8 @@ class PocketView extends StatefulWidget {
     this.keyboardInputEnabled = false,
     this.keyboardAutofocus = false,
     this.keyboardButtonMap = const <LogicalKeyboardKey, int>{},
+    this.rawTextInputEnabled = false,
+    this.textLayoutCacheCapacity = 256,
     this.backgroundColor,
     this.compositorSurfaces = const {},
     this.hostSurfaceBuilder,
@@ -599,7 +616,11 @@ class PocketView extends StatefulWidget {
     this.onPerformanceSample,
     this.showDebugFps = true,
     this.enableSceneCapture = false,
-  }) : jsAsset = jsAsset ?? 'assets/app.js',
+  }) : assert(
+         textLayoutCacheCapacity > 0,
+         'textLayoutCacheCapacity must be positive',
+       ),
+       jsAsset = jsAsset ?? 'assets/app.js',
        _jsAssetWasExplicit = jsAsset != null;
 
   final PocketRuntime? runtime;
@@ -633,6 +654,22 @@ class PocketView extends StatefulWidget {
   /// Optional bindings layered over PocketView's standard desktop bindings.
   /// Values are official PocketJS BTN bit values from the pinned contract.
   final Map<LogicalKeyboardKey, int> keyboardButtonMap;
+
+  /// Lets the guest start raw text-input sessions (`textInput.rawOpen`).
+  ///
+  /// While a session is open, hardware key edges reach the guest as
+  /// `input.text` keyDown/keyUp (with a modifier mask) and printable text and
+  /// IME composition arrive through a platform text-input client as
+  /// `commit`/`composition`/`compositionEnd`. The button bitmask path is not
+  /// fed while a session is open. Off by default: a normal PocketView never
+  /// claims keyboard focus or the platform IME for a guest-drawn editor.
+  final bool rawTextInputEnabled;
+
+  /// Maximum number of laid-out text runs retained by this view's text layout
+  /// cache (default 256). Raise it for text-heavy guests such as editors;
+  /// read the counters through [PocketViewController.textLayoutCacheStats].
+  /// Fixed for the lifetime of the view.
+  final int textLayoutCacheCapacity;
 
   /// Backing color for the entire viewport, including uncovered/letterboxed
   /// regions. Set an opaque color on a standalone root surface. Null preserves
@@ -910,7 +947,9 @@ class _PocketViewState extends State<PocketView>
   final Map<String, Future<void>> _loadingMeshImageLevels =
       <String, Future<void>>{};
   final Set<String> _activeMeshImageAssets = <String>{};
-  final PocketTextLayoutCache _textLayoutCache = PocketTextLayoutCache();
+  late final PocketTextLayoutCache _textLayoutCache = PocketTextLayoutCache(
+    capacity: widget.textLayoutCacheCapacity,
+  );
   final Map<String, VideoPlayerController> _videos =
       <String, VideoPlayerController>{};
   // These notifiers are invalidation tokens only. The frame and editor fields
@@ -1003,6 +1042,15 @@ class _PocketViewState extends State<PocketView>
   final Map<String, int> _videoSeeking = <String, int>{};
   final Map<String, String?> _videoSeekEndTokens = <String, String?>{};
   final Map<String, String?> _videoEndedTokens = <String, String?>{};
+  // Raw text-input session (guest-requested via `textInput.rawOpen`). The
+  // only host state is the platform client binding; app policy stays in JS.
+  String? _rawTextInputId;
+  Rect? _rawTextInputRect;
+  PocketRawTextClient? _rawTextClient;
+  Size _rawTextScale = const Size(1, 1);
+  final GlobalKey _rawTextAnchorKey = GlobalKey(
+    debugLabel: 'pocket-raw-text-anchor',
+  );
   String? _textInputId;
   String? _textInputEditingSession;
   int _textInputRevision = 0;
@@ -1186,10 +1234,67 @@ class _PocketViewState extends State<PocketView>
     _controller._setKeyboardButtons(next);
   }
 
+  /// Raw mode: forward the key edge to the guest instead of the button mask.
+  ///
+  /// Printable keys (without Control/Meta) are returned as ignored so the
+  /// platform IME still receives them; everything else is handled so Flutter
+  /// focus traversal and shortcuts cannot steal it. While a composition is
+  /// active the IME owns key presses: only key-up edges are forwarded.
+  KeyEventResult _handleRawTextKey(KeyEvent event) {
+    final client = _rawTextClient;
+    if (client == null) return KeyEventResult.ignored;
+    final composing = client.isComposing;
+    final modifiers = pocketRawTextModifiers();
+    final key = pocketRawKeyName(event.logicalKey, event.character);
+    final isPrintable =
+        key.runes.length == 1 &&
+        key.codeUnitAt(0) >= 0x20 &&
+        (modifiers &
+                (pocketTextModifierControl | pocketTextModifierMeta)) ==
+            0;
+    if (!composing || event is KeyUpEvent) {
+      _sendRawText(
+        () => _controller.sendTextEvent(
+          kind: event is KeyUpEvent ? 'keyUp' : 'keyDown',
+          key: key,
+          repeat: event is KeyRepeatEvent,
+          modifiers: modifiers,
+        ),
+      );
+    }
+    if (composing || isPrintable) return KeyEventResult.ignored;
+    return KeyEventResult.handled;
+  }
+
+  void _sendRawText(bool Function() send) {
+    try {
+      send();
+    } catch (error, stack) {
+      // A rejected event (queue full, malformed) is dropped, never retried.
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'pocket_flutter',
+          context: ErrorDescription('while delivering raw text input'),
+        ),
+      );
+      widget.onError?.call(error);
+    }
+  }
+
   KeyEventResult _handleKeyboardEvent(FocusNode node, KeyEvent event) {
+    if (_rawTextInputId != null &&
+        widget.rawTextInputEnabled &&
+        widget.inputEnabled &&
+        _effectiveActive &&
+        _textInputFocusNode?.hasFocus != true) {
+      return _handleRawTextKey(event);
+    }
     if (!widget.keyboardInputEnabled ||
         !widget.inputEnabled ||
         !_effectiveActive ||
+        _rawTextInputId != null ||
         _textInputFocusNode?.hasFocus == true) {
       return KeyEventResult.ignored;
     }
@@ -1213,14 +1318,28 @@ class _PocketViewState extends State<PocketView>
   }
 
   Widget _wrapKeyboardInput(Widget child) {
-    if (!widget.keyboardInputEnabled) return child;
+    if (!widget.keyboardInputEnabled && !widget.rawTextInputEnabled) {
+      return child;
+    }
     return Focus(
       key: const ValueKey<String>('pocket-keyboard-focus'),
       focusNode: _keyboardFocusNode,
       autofocus: widget.keyboardAutofocus,
       canRequestFocus: true,
       onFocusChange: (focused) {
-        if (!focused) _clearKeyboardButtons();
+        if (!focused) {
+          _clearKeyboardButtons();
+          if (_rawTextInputId != null) {
+            // Defer: focus listeners run while the manager iterates.
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted &&
+                  _rawTextInputId != null &&
+                  !_keyboardFocusNode.hasFocus) {
+                _dismissRawTextInput(reason: 'blur');
+              }
+            });
+          }
+        }
       },
       onKeyEvent: _handleKeyboardEvent,
       child: child,
@@ -1396,6 +1515,9 @@ class _PocketViewState extends State<PocketView>
     }
     if (!mapEquals(oldWidget.compositorSurfaces, widget.compositorSurfaces)) {
       throw StateError('Remount PocketView to change compositor registration');
+    }
+    if (oldWidget.textLayoutCacheCapacity != widget.textLayoutCacheCapacity) {
+      throw StateError('Remount PocketView to change textLayoutCacheCapacity');
     }
     if (oldWidget.inputEnabled && !widget.inputEnabled) {
       _cancelPointerSequences();
@@ -1936,6 +2058,7 @@ class _PocketViewState extends State<PocketView>
         onAppActiveChanged: _onControllerActivityChanged,
         captureScene: _capturePocketViewScene,
         refreshHostFonts: _refreshHostFontsNow,
+        textLayoutCacheStats: () => _textLayoutCache.stats,
       );
       // Re-publish any source that was updated before the runtime finished
       // loading (keyboard or external provider). A neutral source does not
@@ -5637,10 +5760,21 @@ class _PocketViewState extends State<PocketView>
     required bool max,
     int? fallback,
   }) {
-    final value = params[max ? 'maxLines' : 'minLines'];
-    if (value == null) return fallback;
+    final key = max ? 'maxLines' : 'minLines';
+    final value = params[key];
+    // An explicit `maxLines: null` means unbounded growth (multi-line). An
+    // absent key, or any invalid value, keeps the fallback.
+    if (value == null) return params.containsKey(key) && max ? null : fallback;
     if (value is! num || !value.isFinite || value < 1) return fallback;
     return value.toInt();
+  }
+
+  /// Flutter asserts `minLines <= maxLines`; a guest-supplied pair must not be
+  /// able to crash the host.
+  void _clampTextInputLineRange() {
+    final min = _textInputMinLines;
+    final max = _textInputMaxLines;
+    if (min != null && max != null && min > max) _textInputMinLines = max;
   }
 
   String _textInputActionName(TextInputAction action) {
@@ -5748,6 +5882,7 @@ class _PocketViewState extends State<PocketView>
   }
 
   void _dismissTextInput({required String reason, bool rebuild = true}) {
+    _dismissRawTextInput(reason: reason, rebuild: rebuild);
     final id = _textInputId;
     if (id == null) return;
     _sendTextInputDismiss(id, reason);
@@ -5786,6 +5921,8 @@ class _PocketViewState extends State<PocketView>
     final id = _textInputEventId(params);
     final rect = _textInputRectFromParams(params);
     if (id == null || rect == null) return;
+    // A TextField session and a raw session never coexist.
+    _dismissRawTextInput(reason: 'replaced', rebuild: false);
 
     final incomingSession = _textInputEditingSessionFromParams(params);
     if (_textInputId == id &&
@@ -5835,6 +5972,7 @@ class _PocketViewState extends State<PocketView>
       _textInputMaxLines = 1;
       _textInputMinLines = null;
     }
+    _clampTextInputLineRange();
     _markEditorNeedsBuild();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
@@ -5953,6 +6091,7 @@ class _PocketViewState extends State<PocketView>
       _textInputMaxLines = 1;
       _textInputMinLines = null;
     }
+    _clampTextInputLineRange();
     final rect = _textInputRectFromParams(params);
     if (rect != null) {
       _textInputRect = rect;
@@ -6113,8 +6252,128 @@ class _PocketViewState extends State<PocketView>
       ..addAll(next);
   }
 
+  void _sendRawDismiss(String id, String reason) {
+    _controller.send(
+      method: 'textInput.rawDismiss',
+      params: <String, dynamic>{'id': id, 'reason': reason},
+    );
+  }
+
+  void _emitRawText(PocketRawTextOutput output) {
+    if (_rawTextInputId == null) return;
+    _sendRawText(
+      () => _controller.sendTextEvent(
+        kind: output.kind,
+        text: output.kind == 'compositionEnd' ? null : output.text,
+        selectionStart: output.kind == 'composition'
+            ? output.selectionStart
+            : null,
+        selectionEnd: output.kind == 'composition' ? output.selectionEnd : null,
+      ),
+    );
+  }
+
+  void _openRawTextInput(Map<String, dynamic> params) {
+    _wakeTicker();
+    final id = _textInputEventId(params);
+    final rect = _textInputRectFromParams(params);
+    if (id == null || rect == null) return;
+    if (!widget.rawTextInputEnabled || !widget.inputEnabled) {
+      _sendRawDismiss(id, 'unavailable');
+      return;
+    }
+    if (_rawTextInputId == id) {
+      _updateRawTextInput(params);
+      return;
+    }
+    _dismissRawTextInput(reason: 'replaced', rebuild: false);
+    if (_textInputId != null) {
+      _dismissTextInput(reason: 'replaced', rebuild: false);
+    }
+    _clearKeyboardButtons();
+    final client = PocketRawTextClient(
+      emit: _emitRawText,
+      onConnectionClosed: () {
+        if (_rawTextInputId == id) {
+          _dismissRawTextInput(reason: 'platform');
+        }
+      },
+    );
+    _rawTextInputId = id;
+    _rawTextInputRect = rect;
+    _rawTextClient = client;
+    client.attach();
+    _keyboardFocusNode.requestFocus();
+    _markEditorNeedsBuild();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _rawTextInputId != id) return;
+      _syncRawTextGeometry();
+      _controller.send(
+        method: 'textInput.rawOpened',
+        params: <String, dynamic>{'id': id},
+      );
+    });
+  }
+
+  void _updateRawTextInput(Map<String, dynamic> params) {
+    final id = _textInputEventId(params);
+    if (id == null || id != _rawTextInputId) return;
+    final rect = _textInputRectFromParams(params);
+    if (rect == null) return;
+    _rawTextInputRect = rect;
+    _markEditorNeedsBuild();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _rawTextInputId == id) _syncRawTextGeometry();
+    });
+  }
+
+  /// Tells the platform where the caret is so the IME candidate window opens
+  /// next to the guest's caret instead of at the view corner.
+  void _syncRawTextGeometry() {
+    final client = _rawTextClient;
+    final rect = _rawTextInputRect;
+    final anchor = _rawTextAnchorKey.currentContext?.findRenderObject();
+    if (client == null || rect == null || anchor is! RenderBox) return;
+    final scale = _rawTextScale;
+    final caret = Rect.fromLTWH(
+      rect.left * scale.width,
+      rect.top * scale.height,
+      rect.width * scale.width,
+      rect.height * scale.height,
+    );
+    client.setGeometry(
+      size: Size(caret.right, caret.bottom),
+      transform: anchor.getTransformTo(null),
+      caretRect: caret,
+    );
+  }
+
+  void _dismissRawTextInput({required String reason, bool rebuild = true}) {
+    final id = _rawTextInputId;
+    if (id == null) return;
+    _closeRawTextInput(id: id, rebuild: rebuild);
+    _sendRawDismiss(id, reason);
+  }
+
+  void _closeRawTextInput({String? id, bool rebuild = true}) {
+    if (_rawTextInputId == null || (id != null && id != _rawTextInputId)) {
+      return;
+    }
+    _rawTextClient?.detach();
+    _rawTextClient = null;
+    _rawTextInputId = null;
+    _rawTextInputRect = null;
+    if (mounted) _markEditorNeedsBuild();
+  }
+
   void _handleTextInputEvent(PocketEvent event) {
     switch (event.method) {
+      case 'textInput.rawOpen':
+        _openRawTextInput(event.params);
+      case 'textInput.rawUpdate':
+        _updateRawTextInput(event.params);
+      case 'textInput.rawClose':
+        _closeRawTextInput(id: _textInputEventId(event.params));
       case 'textInput.open':
         _openTextInput(event.params);
       case 'textInput.update':
@@ -6424,7 +6683,7 @@ class _PocketViewState extends State<PocketView>
     // while a real PocketJS text editor owns the IME, leave focus untouched.
     if (phase == 'down' &&
         surface == 0 &&
-        widget.keyboardInputEnabled &&
+        (widget.keyboardInputEnabled || _rawTextInputId != null) &&
         _textInputId == null &&
         _textInputFocusNode?.hasFocus != true) {
       _keyboardFocusNode.requestFocus();
@@ -6795,6 +7054,7 @@ class _PocketViewState extends State<PocketView>
     _guestGestureRegions.clear();
     _dismissTextInput(reason: 'runtime.dispose', rebuild: false);
     _closeTextInput(rebuild: false);
+    _closeRawTextInput(rebuild: false);
     _sceneRevision.dispose();
     _editorRevision.dispose();
     for (final image in _images.values) {
@@ -7335,6 +7595,17 @@ class _PocketViewState extends State<PocketView>
     required double scaleY,
   }) {
     _editorBuildCount++;
+    _rawTextScale = Size(scaleX, scaleY);
+    if (_rawTextInputId != null) {
+      // Zero-size anchor at the scene origin: its transform places the IME.
+      return Positioned(
+        left: 0,
+        top: 0,
+        width: 0,
+        height: 0,
+        child: SizedBox.shrink(key: _rawTextAnchorKey),
+      );
+    }
     final textInputId = _textInputId;
     final textInputRect = _textInputRect;
     final textInputClipRect = _textInputClipRect;

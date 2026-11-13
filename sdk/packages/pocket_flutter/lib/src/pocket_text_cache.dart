@@ -2,6 +2,29 @@ import 'dart:collection';
 
 import 'package:flutter/painting.dart';
 
+/// Immutable read-only snapshot of a [PocketTextLayoutCache]'s counters, for
+/// profiling. Values are copied; later cache activity does not change it.
+final class PocketTextLayoutCacheStats {
+  const PocketTextLayoutCacheStats({
+    required this.capacity,
+    required this.length,
+    required this.hitCount,
+    required this.layoutCount,
+    required this.evictionCount,
+  });
+
+  final int capacity;
+  final int length;
+  final int hitCount;
+  final int layoutCount;
+  final int evictionCount;
+
+  @override
+  String toString() =>
+      'PocketTextLayoutCacheStats(capacity: $capacity, length: $length, '
+      'hits: $hitCount, layouts: $layoutCount, evictions: $evictionCount)';
+}
+
 /// A bounded cache of laid-out Flutter text.
 ///
 /// PocketJS emits retained TEXT_RUN strings. Their coordinates are not part of
@@ -27,6 +50,15 @@ final class PocketTextLayoutCache {
   int evictionCount = 0;
 
   int get length => _entries.length;
+
+  /// Read-only counter snapshot (see [PocketTextLayoutCacheStats]).
+  PocketTextLayoutCacheStats get stats => PocketTextLayoutCacheStats(
+    capacity: capacity,
+    length: length,
+    hitCount: hitCount,
+    layoutCount: layoutCount,
+    evictionCount: evictionCount,
+  );
 
   /// Returns a laid-out painter, promoting cache hits to most-recently-used.
   ///

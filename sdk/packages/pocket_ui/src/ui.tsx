@@ -1498,6 +1498,16 @@ export function InputField(props: {
   onSubmit?: (value: string) => void;
   placeholder?: string;
   appearance?: InputFieldAppearance;
+  /**
+   * Multi-line editing. Enter inserts a newline (keyboardType "multiline",
+   * action "newline") and `onSubmit` is not raised by the keyboard. Omitted or
+   * false keeps the single-line `maxLines: 1` payload byte-for-byte.
+   */
+  multiline?: boolean;
+  /** Multi-line only: visible line cap. `null`/omitted means unbounded growth. */
+  maxLines?: number | null;
+  /** Multi-line only: minimum visible lines (>= 1, clamped to maxLines). */
+  minLines?: number;
 }): JSX.Element {
   const routeActive = useRouteActive();
   const scrollPage = useContext(ScrollablePageContext);
@@ -1550,6 +1560,22 @@ export function InputField(props: {
       borderColor: nativeTextVisible ? current.borderColor : "transparent",
       focusedBorderColor: nativeTextVisible ? current.focusedBorderColor : "transparent",
     };
+  };
+  // Keyboard/line metadata. The single-line shape is unchanged for existing
+  // callers; multi-line sends an explicit null for unbounded `maxLines`.
+  const lineParams = (): TextInputParams => {
+    if (!props.multiline) return { keyboardType: "text", action: "done", maxLines: 1 };
+    const rawMax = props.maxLines;
+    const maxLines = rawMax === undefined || rawMax === null || !Number.isFinite(rawMax) || rawMax < 1
+      ? null
+      : Math.floor(rawMax);
+    const params: TextInputParams = { keyboardType: "multiline", action: "newline", maxLines };
+    const rawMin = props.minLines;
+    if (rawMin !== undefined && Number.isFinite(rawMin) && rawMin >= 1) {
+      const minLines = Math.floor(rawMin);
+      params.minLines = maxLines === null ? minLines : Math.min(minLines, maxLines);
+    }
+    return params;
   };
   const appearanceParams = (nativeTextVisible = overlayReady()): TextInputParams => {
     const current = appearance();
@@ -1743,9 +1769,7 @@ export function InputField(props: {
       selectionExtent,
       composingBase,
       composingExtent,
-      keyboardType: "text",
-      action: "done",
-      maxLines: 1,
+      ...lineParams(),
       ...appearanceParams(),
     });
     if (wasOpened && !sent) {
