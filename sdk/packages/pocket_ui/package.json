@@ -29,6 +29,7 @@
     "./recording": "./src/recording.ts",
     "./system-surfaces": "./src/system-surfaces.tsx",
     "./inline-text": "./src/inline-text.tsx",
+    "./code": "./src/code/index.ts",
     "./dev": "./src/dev.ts"
   }
 }
