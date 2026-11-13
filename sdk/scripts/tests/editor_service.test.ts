@@ -696,6 +696,11 @@ test("source upgrade applies the staged Git commit through the real service CLI 
   const source = createSourceUpgradeFixture();
   const port = await allocateLoopbackPort();
   const serviceScript = join(source.sdk, "scripts", "editor_service.mjs");
+  // The service's supported CLI is Node (package scripts and the entrypoint
+  // shebang use it). `process.execPath` here is the Bun test runner; nesting a
+  // detached Bun service CLI under Bun can hang on Windows before `start`
+  // returns. Keep POCKET_BUN pointed at the managed Bun for the actual server.
+  const serviceCli = "node";
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     POCKET_STUDIO_TEST_SOURCE_GIT: "1",
@@ -709,7 +714,7 @@ test("source upgrade applies the staged Git commit through the real service CLI 
   let serviceStarted = false;
   let parentLock: (() => void) | undefined;
   try {
-    const start = spawnSync(process.execPath, [serviceScript, "start"], {
+    const start = spawnSync(serviceCli, [serviceScript, "start"], {
       cwd: source.repo,
       env: childEnv as NodeJS.ProcessEnv,
       encoding: "utf8",
@@ -729,7 +734,7 @@ test("source upgrade applies the staged Git commit through the real service CLI 
       stageDir: source.stageDir,
       handoffToken,
     });
-    const apply = spawnSync(process.execPath, [
+    const apply = spawnSync(serviceCli, [
       serviceScript,
       "upgrade-apply",
       `--stage-dir=${source.stageDir}`,
@@ -761,7 +766,7 @@ test("source upgrade applies the staged Git commit through the real service CLI 
     expect(upgradedRecord.config.nativeProbe).toBe(expectedProbe);
     expect(existsSync(join(source.sdk, "native", "target", "release", process.platform === "win32" ? "pocket_probe.exe" : "pocket_probe"))).toBe(true);
 
-    const restart = spawnSync(process.execPath, [serviceScript, "restart"], {
+    const restart = spawnSync(serviceCli, [serviceScript, "restart"], {
       cwd: source.repo,
       env: childEnv as NodeJS.ProcessEnv,
       encoding: "utf8",
@@ -779,7 +784,7 @@ test("source upgrade applies the staged Git commit through the real service CLI 
   } finally {
     parentLock?.();
     if (serviceStarted) {
-      spawnSync(process.execPath, [serviceScript, "stop"], {
+      spawnSync(serviceCli, [serviceScript, "stop"], {
         cwd: source.repo,
         env: childEnv as NodeJS.ProcessEnv,
         encoding: "utf8",
