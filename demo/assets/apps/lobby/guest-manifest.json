@@ -6,7 +6,6 @@
       "platform.apps.return",
       "platform.messages.send",
       "platform.storage.get",
-      "text.glyphs.baked",
       "text.layout.native"
     ],
     "optional": []

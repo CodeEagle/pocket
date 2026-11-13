@@ -3,7 +3,6 @@
   "protocolVersion": 1,
   "capabilities": {
     "requires": [
-      "text.glyphs.baked",
       "text.layout.native",
       "ui.compositor-surfaces"
     ],

@@ -1300,7 +1300,14 @@ class _PocketViewState extends State<PocketView>
   void _onOwnedRecordingFinished() {
     if (_isDisposed || !_deferredViewHostFontRefresh) return;
     _deferredViewHostFontRefresh = false;
-    _refreshHostFontsNow();
+    // The owned FfiPocketRuntime already has an after-finish listener that
+    // applies its deferred host metrics. This listener only invalidates the
+    // view's TextPainter cache and schedules a frame; syncing here as well
+    // would replace the same native callbacks twice for one font change.
+    PocketHostFontMetrics.clearCache();
+    _textLayoutCache.clear();
+    _markSceneNeedsBuild();
+    _wakeTicker();
   }
 
   bool _refreshHostFontsNow() {

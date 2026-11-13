@@ -321,6 +321,77 @@ void main() {
     skip: libraryPath == null,
   );
 
+  testWidgets(
+    'PocketView defers system font refresh during recording and applies it after finish',
+    (WidgetTester tester) async {
+      final viewController = PocketViewController();
+      final recording = PocketRecordingController();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 240,
+              height: 160,
+              child: PocketView(
+                controller: viewController,
+                recordingFactory: () => recording,
+                jsSource: '''
+                  const n = ui.createNode(1);
+                  ui.setProp(n, 97, 2);
+                  ui.setProp(n, 96, 0xffffffff);
+                  ui.setText(n, "Recording Font Refresh");
+                  ui.insertBefore(1, n, 0);
+                  globalThis.frame = () => {};
+                ''',
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 32));
+
+      expect(viewController.isReady, isTrue);
+      final initialSnapshot = recording.snapshot().metadata.hostFonts;
+      expect(initialSnapshot, isNotNull);
+      final initialMetrics = PocketHostFontMetrics.forFallback();
+
+      await PaintingBinding.instance.handleSystemMessage(<String, dynamic>{
+        'type': 'fontsChange',
+      });
+      await tester.pump();
+
+      expect(viewController.refreshHostFonts(), isFalse);
+      expect(
+        identical(PocketHostFontMetrics.forFallback(), initialMetrics),
+        isTrue,
+        reason: 'the live metrics cache stays stable while recording',
+      );
+      expect(recording.snapshot().metadata.hostFonts, same(initialSnapshot));
+
+      final sealedRecording = recording.finish();
+      expect(sealedRecording.incomplete, isFalse);
+      expect(sealedRecording.metadata.hostFonts, same(initialSnapshot));
+      expect(
+        identical(PocketHostFontMetrics.forFallback(), initialMetrics),
+        isFalse,
+        reason: 'finish invalidates view caches and reapplies runtime metrics',
+      );
+
+      final afterFinishMetrics = PocketHostFontMetrics.forFallback();
+      expect(viewController.refreshHostFonts(), isTrue);
+      expect(
+        identical(PocketHostFontMetrics.forFallback(), afterFinishMetrics),
+        isFalse,
+        reason: 'an explicit post-recording refresh synchronizes normally',
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+    skip: libraryPath == null,
+  );
+
   test(
     'FfiPocketRuntime admits legacy empty PAK and gates explicit ui:fonts.host PAK on syncPocketHostFonts',
     () {

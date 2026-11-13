@@ -1,5 +1,15 @@
 # Visual novel & host-native font rendering
 
+## Source-first comparison
+
+The retained parent `/Volumes/ORICO/Development/Github/pocketjs_flutter_demo`
+was inspected outside its excluded `pocket_host/` directory. Its generic text
+path in `lib/render/pocket_ui_components.dart` resolves a Flutter `TextStyle`
+and paints live JS strings with Flutter `Text`; it has no native font-metrics
+or shaped-text callback contract. This SDK keeps that platform-font behavior
+and adds the metrics and shaping bridge needed by the native layout engine,
+without importing the excluded host implementation or adding a compiler.
+
 By default, Pocket Flutter builds (including the Lantern visual novel demo) skip
 DCFA bitmap font atlas baking (`fonts: "host"` in `app.bytecode.json` and
 `guest-manifest.json`, plus a `ui:fonts.host` intent marker in `app.pak`) and
@@ -36,9 +46,9 @@ When neither `fonts.regular`/`fonts.bold` nor `--bake-fonts` is specified:
    `hostTextAdvance` trace scalars.
 4. `PocketCanvasPainter` (`pocket_view_painter.dart`) resolves slots directly
    against platform system fonts (proportional default family for slots `0..15`
-   and `19..20`; platform monospace fallback chain `Menlo` / `SF Mono` /
-   `Roboto Mono` / `DejaVu Sans Mono` / `Consolas` / `monospace` for slots
-   `16..18`) without referencing undeclared `PocketInter` or `PocketMono`
+   and `19..20`; `monospace` followed by `Menlo` / `SF Mono` / `Consolas` /
+   `Roboto Mono` / `DejaVu Sans Mono` / `Courier New` fallback for slots `16..18`)
+   without referencing undeclared `PocketInter` or `PocketMono`
    families. Tracked (`letterSpacing`) and 2D/projected-3D transformed text
    runs stay on vector `TEXT_RUN` records (`TEXT_RUN_FLAG_TRACKING` and
    `TEXT_RUN_FLAG_AFFINE`).

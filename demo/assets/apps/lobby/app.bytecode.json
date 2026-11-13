@@ -8,7 +8,7 @@
   "kind": "script",
   "payloadSha256": "cf2c03a2a7ac4e381c318a4fdc10b00a281f67b054bcbc1473ac113dad77b687",
   "runtimeAbi": "quickjs-bytecode-v1:5ab2246bcbd64b9d66e396043be05c2f77e7a6ab78e3125c56f8a1f62019a021",
-  "sourceSha256": "688b8d13c0ac772d5fb204945d839e56a1feef294e277501c46ffb6bbb0bf36d",
+  "sourceSha256": "e3c686ebee95125386d5fc9a1203011418aa7357337f2c9ea13867744eb572ce",
   "tickHz": 60,
   "version": "0.1.0",
   "build": 1,

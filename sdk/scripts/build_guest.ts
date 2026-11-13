@@ -165,7 +165,7 @@ function runOrThrow(command: string[], cwd: string, log?: (line: string) => void
   if (result.status !== 0) throw new Error(`${command[0]} exited with status ${result.status ?? 1}`);
 }
 
-function bytecodeCompilerCommand(rootPath: string, args: string[]): string[] {
+export function bytecodeCompilerCommand(rootPath: string, args: string[]): string[] {
   const configured = process.env.POCKET_BYTECODE_BIN?.trim();
   if (configured) {
     const binary = resolve(configured);
@@ -991,10 +991,14 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
         ];
         const addedSet = new Set(addedRequires);
         const requires = Array.isArray(capabilities.requires)
-          ? capabilities.requires.filter((value): value is string => typeof value === "string")
+          ? capabilities.requires.filter((value): value is string =>
+            typeof value === "string" && !(skipFontBaking && value === "text.glyphs.baked"),
+          )
           : [];
         const optional = Array.isArray(capabilities.optional)
-          ? capabilities.optional.filter((value): value is string => typeof value === "string" && !addedSet.has(value))
+          ? capabilities.optional.filter((value): value is string =>
+            typeof value === "string" && !addedSet.has(value) && !(skipFontBaking && value === "text.glyphs.baked"),
+          )
           : [];
         outputManifest.capabilities = {
           ...capabilities,

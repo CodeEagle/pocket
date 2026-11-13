@@ -9,7 +9,8 @@ import { cpSync, existsSync, readFileSync, readdirSync, mkdirSync, mkdtempSync, 
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveManagedBun, resolvePrebuiltTools, UPSTREAM_REVISION } from "./prebuilt_tools.mjs";
+import { resolveManagedBun, UPSTREAM_REVISION } from "./prebuilt_tools.mjs";
+import { bytecodeCompilerCommand } from "./build_guest.ts";
 
 type JsonObject = Record<string, any>;
 type Motion = "continuous" | "static";
@@ -583,7 +584,6 @@ async function buildDemo(demo: Demo, outputRoot: string, tickHz: number, density
   const skipFontBaking = !bakeFonts;
   const fontDelivery = skipFontBaking ? "host" : "baked";
   const bun = resolveManagedBun(sdkRoot);
-  const pinnedTools = resolvePrebuiltTools(sdkRoot);
   const mounted = prepareWorkerHttpSource(demo, entryAbsolute, bakeFonts);
   const upstreamBuildCommand = [bun, join(upstreamRoot, "tools/build.ts"), mounted.entry,
     `--project-root=${mounted.projectRoot}`, `--outdir=${outputAbsolute}`, `--framework=${demo.framework}`, `--hz=${tickHz}`, `--density=${density}`,
@@ -595,11 +595,11 @@ async function buildDemo(demo: Demo, outputRoot: string, tickHz: number, density
   const workerSource = demo.workerDeclaration ? join(outputAbsolute, `${outputName}.worker.js`) : undefined;
   const workerBytecode = demo.workerDeclaration ? join(outputAbsolute, "app.worker.qjbc") : undefined;
   const workerMetadata = demo.workerDeclaration ? join(outputAbsolute, "app.worker.bytecode.json") : undefined;
-  const bytecodeCommand = [pinnedTools.bytecode, "--input", generatedSource, "--output", bytecode,
-    "--metadata", metadata, "--kind", "script", "--tick-hz", String(tickHz)];
+  const bytecodeCommand = bytecodeCompilerCommand(sdkRoot, ["--input", generatedSource, "--output", bytecode,
+    "--metadata", metadata, "--kind", "script", "--tick-hz", String(tickHz)]);
   const workerBytecodeCommand = workerSource && workerBytecode && workerMetadata
-    ? [pinnedTools.bytecode, "--input", workerSource, "--output", workerBytecode,
-      "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)]
+    ? bytecodeCompilerCommand(sdkRoot, ["--input", workerSource, "--output", workerBytecode,
+      "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)])
     : undefined;
   const command = {
     wrapper: ["bun", "scripts/official_demos.ts", "build", `--apps=${demo.id}`, ...(bakeFonts ? ["--bake-fonts"] : [])],
