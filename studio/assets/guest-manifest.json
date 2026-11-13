@@ -51,7 +51,12 @@
       "studio.publish.plan",
       "studio.publish.publish",
       "studio.service.health",
-      "studio.service.upgrade.status"
+      "studio.service.upgrade.status",
+      "system.runtime.awaitFirstFrame",
+      "system.storage.get",
+      "system.storage.set",
+      "system.storage.remove",
+      "system.storage.keys"
     ]
   },
   "permissions": {

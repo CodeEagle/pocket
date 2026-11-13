@@ -4,8 +4,19 @@ export interface FlatFile { path: string; bytes: number }
 export interface TreeNode { name: string; path: string; kind: "file" | "directory"; bytes: number; children: TreeNode[] }
 export interface TreeRow { node: TreeNode; depth: number; expanded: boolean }
 
-export function buildTree(files: readonly FlatFile[]): TreeNode[] {
+/** `directories` lists folders that have no files yet (the service's flat list cannot show them). */
+export function buildTree(files: readonly FlatFile[], directories: readonly string[] = []): TreeNode[] {
   const root: TreeNode = { name: "", path: "", kind: "directory", bytes: 0, children: [] };
+  for (const directory of directories) {
+    let current = root;
+    const parts = directory.split("/").filter(Boolean);
+    parts.forEach((part, index) => {
+      const path = parts.slice(0, index + 1).join("/");
+      let child = current.children.find((c) => c.name === part && c.kind === "directory");
+      if (!child) { child = { name: part, path, kind: "directory", bytes: 0, children: [] }; current.children.push(child); }
+      current = child;
+    });
+  }
   for (const file of files) {
     const parts = file.path.split("/").filter(Boolean);
     let current = root;

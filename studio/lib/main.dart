@@ -1,5 +1,8 @@
 // dart format width=100
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:pocket_clipboard/pocket_clipboard.dart';
 import 'package:pocket_sdk/pocket_sdk.dart';
 import 'package:pocket_studio/pocket_studio.dart';
@@ -13,7 +16,10 @@ final studioService = PocketStudioService(studioConfig);
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await studioService.start(); // attach to a healthy service or spawn one; stops on exit
-  runApp(studioApp(studioConfig));
+  // The service creates the preview signing key at startup, so the preview child is fully
+  // configured before the first publish. Its bootstrap carries only the runtime ABI of this host.
+  final bootstrap = previewBootstrap(await rootBundle.loadString('assets/app.bytecode.json'));
+  runApp(studioApp(studioConfig, previewBootstrapMetadata: bootstrap));
 }
 
 /// The Studio guest is the only app granted studio.* and clipboard capabilities.
@@ -31,11 +37,13 @@ PocketAppConfig studioSystemUI(PocketStudioConfig config) => PocketAppConfig(
 );
 
 /// Preview child: signed update slot only. No allowedPermissions and no plugins, so it can never
-/// reach studio.* or clipboard. The slot key exists after the service's first preview publish.
-PocketAppConfig studioPreviewChild(PocketStudioConfig config) {
+/// reach studio.* or clipboard. The service creates the preview key at startup (before any publish).
+PocketAppConfig studioPreviewChild(PocketStudioConfig config, {String? previewBootstrapMetadata}) {
   final key = config.readPreviewKey();
   return PocketAppConfig(
     appId: PocketStudioConfig.previewAppId,
+    bootstrapMetadataJson: previewBootstrapMetadata,
+    bootstrapManifestJson: previewBootstrapMetadata == null ? null : _previewBootstrapManifest,
     downloadOnOpen: key != null,
     updates: key == null
         ? null
@@ -49,12 +57,36 @@ PocketAppConfig studioPreviewChild(PocketStudioConfig config) {
   );
 }
 
-Widget studioApp(PocketStudioConfig config, {PocketSystemHostController? controller}) => MaterialApp(
+const _previewBootstrapManifest = '{"protocolVersion":1,"capabilities":{"requires":[],"optional":[]}}';
+
+/// Bootstrap metadata of the preview child: this host's runtime ABI and a build floor of 1, so any
+/// signed preview (build >= 2) is admitted. The executable bytes and manifest come only from the
+/// signed package.
+String previewBootstrap(String studioMetadataJson) {
+  final studio = jsonDecode(studioMetadataJson) as Map<String, dynamic>;
+  return jsonEncode({
+    'runtimeAbi': studio['runtimeAbi'],
+    'entryFormat': 'quickjs-bytecode',
+    'version': 'bootstrap',
+    'build': 1,
+  });
+}
+
+Widget studioApp(
+  PocketStudioConfig config, {
+  PocketSystemHostController? controller,
+  String? previewBootstrapMetadata,
+}) => MaterialApp(
   debugShowCheckedModeBanner: false,
   title: 'Pocket Studio',
   home: PocketSystemHost(
     systemUI: studioSystemUI(config),
-    applications: {PocketStudioConfig.previewAppId: studioPreviewChild(config)},
+    applications: {
+      PocketStudioConfig.previewAppId: studioPreviewChild(
+        config,
+        previewBootstrapMetadata: previewBootstrapMetadata,
+      ),
+    },
     controller: controller,
   ),
 );

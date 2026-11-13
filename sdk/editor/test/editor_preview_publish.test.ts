@@ -80,6 +80,19 @@ afterAll(async () => {
   rmSync(workspace, { recursive: true, force: true });
 });
 
+test("the preview signing key exists right after startup, before any publish, and is never rotated", async () => {
+  // A trusted host reads the public key at its own startup to configure the signed preview child.
+  const keyPath = join(workspace, "keys", "editor-preview-key.json");
+  expect(existsSync(keyPath)).toBe(true);
+  const first = JSON.parse(readFileSync(keyPath, "utf8"));
+  expect(first.keyId).toBe("editor-preview");
+  expect(typeof first.publicKeyBase64).toBe("string");
+  expect(existsSync(join(workspace, "updates", ".preview"))).toBe(false); // nothing was published
+  await server.stop(true);
+  await startServer();
+  expect(JSON.parse(readFileSync(keyPath, "utf8")).publicKeyBase64).toBe(first.publicKeyBase64);
+});
+
 test("preview-publish requires a successful current build (409)", async () => {
   const early = await api("/api/projects/pv-app/preview-publish", { method: "POST", json: {} });
   expect(early.status).toBe(409);

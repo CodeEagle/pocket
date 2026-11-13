@@ -139,19 +139,19 @@ plus stage/localization/authoring/backups modules).
 | --- | --- | --- | --- | --- |
 | Shell | Project switcher, project title/subtitle/state | `project-switcher`, `projects`, `project-title`, `project-state` | M1 | [x] (list + open + 暂无项目 state; subtitle/state chips later) |
 | Shell | New project dialog with App/Game template | `new-project`, `create-dialog`, `create-form` | M1 | [x] (App/Game, id, name, appId; version/tickHz fields later) |
-| Shell | Left rail: stage, source, console, resources, settings, versions | `rail-*` | M1 | [~] (rail present; only 项目/源码 active, others say "later milestone") |
-| Shell | Notice toast | `notice*` | M1 | [~] (error text line, no toast) |
+| Shell | Left rail: stage, source, console, resources, settings, versions | `rail-*` | M1 | [x] (项目/源码/控制台/预览/资源/设置 are real pages; 产物/发布/版本 are M5 placeholders) |
+| Shell | Notice toast | `notice*` | M1 / M2 | [x] (bottom-right toast stack, tone, auto-dismiss, tap to dismiss) |
 | Shell | Studio self-upgrade bar | `studio-upgrade-*` | M6 | [ ] |
-| Source | File picker, source editor, save, reload, bytes/revision, split toggle, close | `file-picker`, `source`, `save`, `refresh-source`, `source-*` | M2 / M4 | [ ] |
+| Source | File picker, source editor, save, reload, bytes/revision, split toggle, close | `file-picker`, `source`, `save`, `refresh-source`, `source-*` | M2 / M4 | [x] M2: tree, tabs with dirty state, multi-line InputField, Save button, unsaved prompts, create/rename/delete/mkdir/rmdir, fs.watch reconcile, chunked IO, 1 MiB cap. [~] Cmd/Ctrl+S is wired through `onTextEvent` but a focused InputField keeps its keys (reliable only with the M4 raw CodeView); folder rename unsupported (service moves files only); large-file editing is M4 |
 | Preview | Viewport picker, phone bezel toggle, regions overlay, resize height | `viewport-picker`, `preview-bezel-toggle`, `toggle-regions`, `resize-preview-height` | M3 | [ ] |
-| Preview | Refresh, capture screenshot, copy preview link | `refresh-preview`, `capture-preview`, `copy-preview-link` | M3 (link is web-only) | [ ] |
-| Preview | Child app surfaces | `preview-surfaces` | M3 | [ ] |
+| Preview | Refresh, capture screenshot, copy preview link | `refresh-preview`, `capture-preview`, `copy-preview-link` | M3 (link is web-only) | [~] refresh = "构建并刷新预览"/"重新加载"; screenshot and link not built |
+| Preview | Child app surfaces | `preview-surfaces` | M3 | [x] signed child composited by `CompositorSurface` (Source dock and Preview page); phases building/publishing/loading/running/error are real facts. Linux proof with the real library + service: `studio/test/studio_preview_loop_test.dart`; on-screen behavior on macOS not verified |
 | Preview | Local Bluetooth (Noble) toggle | `web-bluetooth-toggle`, `bluetooth-provider` | — (ask owner) | — |
-| Console | Build tab: build button, state, log, clear | `build`, `build-state`, `log`, `clear-log` | M3 | [ ] |
-| Console | Deploy tab: device picker, deploy, cancel, log | `device-picker`, `deploy`, `deploy-cancel`, `deploy-log` | M3 | [ ] |
+| Console | Build tab: build button, state, log, clear | `build`, `build-state`, `log`, `clear-log` | M3 | [x] start/cancel, status, build.events stream with JS reconnect, 2,000-line ring buffer with gap markers, clickable diagnostics (open file at line; the InputField shows the line context, CodeView scrolls in M4) |
+| Console | Deploy tab: device picker, deploy, cancel, log | `device-picker`, `deploy`, `deploy-cancel`, `deploy-log` | M3 | [x] on the Preview page (device list, deploy builds first, polling, log, stop). Not exercised against a real device/simulator here |
 | Console | Signing tab: publish test, target picker, channel, reused packages | `publish-test`, `publish-target-*` | M5 | [ ] |
 | Console | Artifacts tab: artifact list, runtime ABI | `artifacts`, `runtime-abi` | M5 | [ ] |
-| Inspector | Resources: package picker, placement list, save | `resource-*`, `save-resources` | M5 | [ ] |
+| Inspector | Resources: package picker, placement list, save | `resource-*`, `save-resources` | M5 | [ ] (the "资源" page is the M2 asset browser: list + metadata; image preview unavailable, see ARCHITECTURE) |
 | Inspector | Settings: name, title, appId, version, build, tickHz | `config-*` | M1 | [ ] (`studio.project.settings.*` transport done, UI pending) |
 | Inspector | Versions: backend origin, slots, history, host guide, app config | `version-*` | M5 | [ ] |
 | Tools | Export diagnostics | `export-diagnostics` | M7 | [ ] |
@@ -188,3 +188,17 @@ lifecycle, JS client with verified chunked transfer, shell with rail, project li
 tree and viewer. Exit test: `studio/test/studio_host_test.dart` ("the Studio window lists the files of the demo
 JS project using capabilities only") passes on the real native library and the real editor service. Not
 verified (needs macOS): the app window, IME, on-screen compositing.
+
+## 6. M2 and M3 status (editing, build, logs, live preview)
+
+Exit tests (real native library, real editor service, both on temp copies, never the real `demo/js`):
+
+* M2: `studio/test/studio_edit_test.dart` edits `release.ts` of a temp copy of the Showcase project through the
+  Studio guest (tap project, tap file, `textInput.open`/`textInput.edit`, Save) and asserts the bytes on disk.
+* M3: `studio/test/studio_preview_loop_test.dart` drives the Studio by pointer taps and the Flutter text overlay
+  with auto-build switched on in Settings; each Save produces build -> preview-publish -> child reload and the
+  child's frame digests change. It prints `STUDIO_SAVE_TO_PREVIEW_LATENCY`.
+
+Open: asset image preview (no byte capability for `assets/`, no PNG/JPEG decoder in the SDK), asset upload (needs a
+file-dialog capability), folder rename, screenshot/copy-link, Cmd/Ctrl+S inside a focused InputField, macOS
+verification of compositing, focus and health promotion of the preview child.

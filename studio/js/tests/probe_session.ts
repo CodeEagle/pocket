@@ -51,6 +51,11 @@ export class ProbeSession {
   private lineWaiters: Array<{ ok: (o: any) => void; fail: (e: Error) => void }> = [];
   private failure: Error | undefined;
 
+  /** Receives guest -> host events other than host.request (stream.open / stream.cancel ...). */
+  onGuestEvent?: (name: string, payload: Record<string, any>) => void;
+  /** Every guest -> host event other than host.request, newest last (bounded). */
+  readonly guestEvents: Array<{ name: string; payload: Record<string, any> }> = [];
+
   constructor(private readonly responder: Responder, private readonly size = { width: 900, height: 640 }) {
     this.child = spawn(probePath(), [], { stdio: ["pipe", "pipe", "pipe"] });
     const decoder = new StringDecoder("utf8");
@@ -90,6 +95,11 @@ export class ProbeSession {
 
   private async answer(frame: Frame): Promise<void> {
     for (const item of frame.events ?? []) {
+      if (item.name && item.name !== "host.request" && item.payload) {
+        this.guestEvents.push({ name: item.name, payload: item.payload });
+        if (this.guestEvents.length > 400) this.guestEvents.splice(0, 200);
+        this.onGuestEvent?.(item.name, item.payload);
+      }
       if (item.name !== "host.request" || !item.payload) continue;
       const request: HostRequest = { requestId: String(item.payload.requestId), capability: String(item.payload.capability), params: item.payload.params ?? {} };
       this.requests.push(request);
@@ -101,6 +111,25 @@ export class ProbeSession {
         } } });
       } catch { /* session closed */ }
     }
+  }
+
+  /** Drives a focused InputField like the Flutter overlay: after the tap that opened it, deliver `text` as a native edit. */
+  async typeIntoOpenField(text: string): Promise<Frame> {
+    const open = [...this.guestEvents].reverse().find((e) => e.name === "textInput.open" && e.payload.id);
+    assert.ok(open, "no textInput.open was emitted by the guest");
+    const latest = [...this.guestEvents].reverse().find((e) => e.name === "textInput.update" && e.payload.id === open.payload.id);
+    const revision = Math.max(Number(open.payload.revision ?? 0), Number(latest?.payload.revision ?? 0));
+    this.sendEvent("textInput.edit", {
+      id: String(open.payload.id), editingSession: String(open.payload.editingSession),
+      revision: revision + 1, jsRevision: Number(latest?.payload.jsRevision ?? open.payload.jsRevision ?? 0),
+      text, selectionBase: text.length, selectionExtent: text.length, composingBase: -1, composingExtent: -1,
+    });
+    return this.frame();
+  }
+
+  /** Sends a host -> guest event (stream.data / stream.end, input.text ...). */
+  sendEvent(name: string, payload: Record<string, unknown>): void {
+    this.send({ op: "send", message: { type: "event", name, payload } });
   }
 
   private line(): Promise<any> {

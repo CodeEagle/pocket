@@ -7,6 +7,8 @@ import { sha256Hex } from "./sha256.ts";
 export const CHUNK_BYTES = 128 * 1024;
 export const SMALL_WRITE_BYTES = 192 * 1024;
 export const DEFAULT_MAX_READ_BYTES = 4 * 1024 * 1024;
+/** `studio.fs.read` returns `too_large` above ~240 KiB; larger files go straight to chunked reads. */
+export const SMALL_READ_BYTES = 240 * 1024;
 
 export interface StudioHost {
   request<T = unknown>(capability: string, params?: Record<string, unknown>): Promise<T>;
@@ -115,12 +117,14 @@ export function createStudioClient(host: StudioHost, streams?: StudioStreams) {
       return { bytes: out, sha256: digest };
     },
     /** Reads UTF-8 text: one small call when possible, chunked and verified otherwise. */
-    async readText(project: string, path: string, maxBytes = DEFAULT_MAX_READ_BYTES): Promise<{ text: string; bytes: number; revision?: number }> {
-      try {
-        const small = await fs.read(project, path);
-        return { text: small.content, bytes: small.bytes, revision: small.revision };
-      } catch (error) {
-        if (!(error instanceof StudioError) || error.code !== "too_large") throw error;
+    async readText(project: string, path: string, maxBytes = DEFAULT_MAX_READ_BYTES, knownBytes?: number): Promise<{ text: string; bytes: number; revision?: number }> {
+      if (knownBytes === undefined || knownBytes <= SMALL_READ_BYTES) {
+        try {
+          const small = await fs.read(project, path);
+          return { text: small.content, bytes: small.bytes, revision: small.revision };
+        } catch (error) {
+          if (!(error instanceof StudioError) || error.code !== "too_large") throw error;
+        }
       }
       const { bytes } = await fs.readBytes(project, path, maxBytes);
       return { text: utf8Decode(bytes), bytes: bytes.length };

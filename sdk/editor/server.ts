@@ -50,7 +50,7 @@ import { createStudioDiagnostics, handleDiagnosticsRequest } from "./diagnostics
 import { createStudioUpgradeManager, readInstalledSdkInfo } from "../scripts/studio_upgrade.mjs";
 import { resolveProjectTemplate } from "../scripts/project_templates.ts";
 import { chooseUpdateHost, isLocalNetworkAddress, startUpdateEndpoint } from "./update_endpoint.ts";
-import { publishPreview, readPreviewSlot } from "./preview_publish.ts";
+import { previewTrust, publishPreview, readPreviewSlot } from "./preview_publish.ts";
 import {
   currentVersion,
   emptyVersionHistory,
@@ -2486,6 +2486,14 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     ...(projectRoot ? { projectRoot, projectId } : {}),
   };
   workspace.projectSources = new Map();
+  // Create the preview signing key (public half only is ever read by a host) at
+  // startup so a trusted host can configure the signed preview child before the
+  // first preview-publish. Idempotent: an existing key is never rotated.
+  try {
+    await previewTrust(workspace);
+  } catch (error) {
+    console.warn(`Editor preview key is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (projectRoot && projectId) {
     try {
       workspace.projectSources = await loadCatalogProjectSources(projectRoot, projectId, workspace.projects);

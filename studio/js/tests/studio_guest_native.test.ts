@@ -1,101 +1,138 @@
 import { strict as assert } from "node:assert";
 import { test } from "bun:test";
-import { center, ProbeSession, textOf, textOps, type HostRequest, type Reply } from "./probe_session.ts";
+import { ProbeSession, textOf, textOps, center } from "./probe_session.ts";
+import { boot, has, openAlpha, openFile, tapText, typeInEditor } from "./helpers.ts";
 
-// A fake studio.* provider serving the exact result shapes of the frozen
-// contract (studio/docs/ARCHITECTURE.md). It is the Dart provider's stand-in
-// only for this guest-level test; the provider itself is tested in Dart.
-const files = [
-  { path: "app.tsx", bytes: 40 },
-  { path: "manifest.json", bytes: 20 },
-  { path: "src/alpha.ts", bytes: 30 },
-  { path: "src/deep/beta.ts", bytes: 10 },
-];
-const contents: Record<string, string> = {
-  "app.tsx": "export const MARKER_APP_TSX = 1;\n",
-  "src/alpha.ts": "export const MARKER_ALPHA = 2;\n",
-};
-const projects = [
-  { id: "alpha-app", appId: "pocket.alpha", name: "Alpha", title: "Alpha 应用", version: "0.1.0", build: 1, tickHz: 60, template: "app" },
-  { id: "beta-game", appId: "pocket.beta", name: "Beta", title: "Beta 游戏", version: "0.1.0", build: 1, tickHz: 60, template: "game" },
-];
+// Guest-level tests of the Studio on the real native probe (built bytecode,
+// real QuickJS runtime, real input events). The studio.* provider and the
+// System host are the stateful fake in fake_studio.ts; the Dart provider and
+// the real service are covered by their own suites.
 
-function responder(log: HostRequest[]) {
-  return (request: HostRequest): Reply => {
-    log.push(request);
-    const { capability, params } = request;
-    switch (capability) {
-      case "studio.project.list": return { ok: true, result: { projects } };
-      case "studio.fs.tree": return { ok: true, result: { files, revision: 1 } };
-      case "studio.fs.read": {
-        const content = contents[params.path];
-        return content === undefined
-          ? { ok: false, error: { code: "not_found", message: "file not found" } }
-          : { ok: true, result: { path: params.path, content, bytes: content.length, revision: 1 } };
-      }
-      case "studio.project.create": return { ok: true, result: { ...projects[0], id: params.id, title: params.settings?.name ?? params.id } };
-      default: return { ok: false, error: { code: "capability_unavailable", message: capability } };
-    }
-  };
-}
-
-test("Studio guest renders the project list, opens a project and expands folders by input", async () => {
-  const log: HostRequest[] = [];
-  const session = new ProbeSession(responder(log));
+test("project list, open a project, expand folders and open a file in a tab by input", async () => {
+  const { fake, session } = await boot();
   try {
-    await session.boot();
-    let frame = await session.until((f) => textOf(f).includes("Alpha 应用"), "project list");
-    const text = textOf(frame);
-    assert.ok(text.includes("Beta 游戏"), text);
-    assert.ok(text.includes("项目"), text);
-    assert.equal(log[0]?.capability, "studio.project.list");
+    let frame = await session.until((f) => has(f, "Alpha 应用"), "project list");
     const projectListFrame = textOf(frame);
+    assert.ok(has(frame, "Beta 游戏") && has(frame, "项目"), projectListFrame);
+    assert.equal(fake.requests[0]?.capability, "studio.project.list");
 
-    // Tap a project: frames change and the tree is requested through the capability.
-    const tile = textOps(frame, "Alpha 应用")[0]!;
-    const p = center(tile);
-    await session.tap(p.x, p.y);
-    frame = await session.until((f) => textOf(f).includes("app.tsx"), "file tree");
+    await tapText(session, frame, "Alpha 应用");
+    frame = await session.until((f) => has(f, "app.tsx"), "file tree");
     assert.notEqual(textOf(frame), projectListFrame, "tapping a project must change the frame");
-    const tree = textOf(frame);
-    for (const name of ["app.tsx", "manifest.json", "▸ src"]) assert.ok(tree.includes(name), `${name} missing in\n${tree}`);
-    assert.ok(!tree.includes("alpha.ts"), "collapsed folder must hide children");
-    assert.deepEqual(log.filter((r) => r.capability === "studio.fs.tree").map((r) => r.params), [{ project: "alpha-app" }]);
+    for (const name of ["app.tsx", "manifest.json", "▸ src"]) assert.ok(has(frame, name), `${name} missing in\n${textOf(frame)}`);
+    assert.ok(!has(frame, "alpha.ts"), "collapsed folder must hide children");
+    assert.deepEqual(fake.calls("studio.fs.tree").map((r) => r.params), [{ project: "alpha-app", assets: true }]);
 
-    // Tap the folder: it expands.
-    const folder = center(textOps(frame, "▸ src")[0]!);
-    await session.tap(folder.x, folder.y);
-    frame = await session.until((f) => textOf(f).includes("alpha.ts"), "expanded folder");
-    assert.ok(textOf(frame).includes("▾ src"));
-    assert.ok(textOf(frame).includes("▸ deep"));
+    await tapText(session, frame, "▸ src");
+    frame = await session.until((f) => has(f, "alpha.ts"), "expanded folder");
+    assert.ok(has(frame, "▾ src") && has(frame, "▸ deep"));
 
-    // Tap a file: the read-only viewer shows its text.
-    const file = center(textOps(frame, "alpha.ts")[0]!);
-    await session.tap(file.x, file.y);
-    frame = await session.until((f) => textOf(f).includes("MARKER_ALPHA"), "file viewer");
-    assert.ok(textOf(frame).includes("src/alpha.ts"));
-    assert.deepEqual(log.filter((r) => r.capability === "studio.fs.read").map((r) => r.params), [{ project: "alpha-app", path: "src/alpha.ts" }]);
+    await tapText(session, frame, "alpha.ts");
+    frame = await session.until((f) => has(f, "MARKER_ALPHA"), "file in editor");
+    assert.ok(has(frame, "src/alpha.ts"), "tab and header name the file");
+    assert.deepEqual(fake.calls("studio.fs.read").map((r) => r.params), [{ project: "alpha-app", path: "src/alpha.ts" }]);
 
-    // Tap the folder again: it collapses.
-    const again = center(textOps(frame, "▾ src")[0]!);
-    await session.tap(again.x, again.y);
-    frame = await session.until((f) => !textOf(f).includes("▸ deep") && textOf(f).includes("▸ src"), "collapsed folder");
-    // Only studio.* capabilities were ever requested.
-    assert.ok(log.every((r) => r.capability.startsWith("studio.")), JSON.stringify(log.map((r) => r.capability)));
-  } finally {
-    session.kill();
-  }
+    await tapText(session, frame, "▾ src");
+    frame = await session.until((f) => !has(f, "▸ deep") && has(f, "▸ src"), "collapsed folder");
+
+    for (const r of fake.requests) assert.ok(/^(studio|system|platform)\./.test(r.capability), r.capability);
+  } finally { session.kill(); }
 }, 60_000);
 
-test("Studio guest shows structured capability errors instead of fake success", async () => {
-  const log: HostRequest[] = [];
-  const session = new ProbeSession((r) => (log.push(r), { ok: false, error: { code: "service_unreachable", message: "Studio service is not reachable" } }));
+test("capability errors are shown as a toast instead of fake success", async () => {
+  const session = new ProbeSession((r) => (r.capability.startsWith("studio.") ? { ok: false, error: { code: "service_unreachable", message: "Studio service is not reachable" } } : { ok: false, error: { code: "capability_unavailable", message: r.capability } }));
   try {
     await session.boot();
-    const frame = await session.until((f) => textOf(f).includes("service_unreachable"), "error notice");
-    assert.ok(textOf(frame).includes("Studio service is not reachable"));
-    assert.ok(!textOf(frame).includes("Alpha"));
-  } finally {
-    session.kill();
-  }
+    const frame = await session.until((f) => has(f, "service_unreachable"), "error toast");
+    assert.ok(has(frame, "Studio service is not reachable"));
+    assert.ok(!has(frame, "Alpha"));
+    // The toast sits at the bottom-right corner of the window.
+    const toast = textOps(frame, /service_unreachable/)[0]!;
+    assert.ok(toast.y! > 400 && toast.x! > 400, `toast at ${toast.x},${toast.y}`);
+  } finally { session.kill(); }
 }, 60_000);
+
+test("edit in the multi-line InputField, dirty marker, Save button writes through studio.fs.write", async () => {
+  const { fake, session } = await boot();
+  try {
+    await openAlpha(session);
+    let frame = await openFile(session, "app.tsx", "MARKER_APP_TSX");
+    assert.ok(!has(frame, "●"), "a freshly opened file is clean");
+    frame = await typeInEditor(session, frame, /MARKER_APP_TSX/, "export const EDITED_LINE = 42;\nsecond line\n");
+    frame = await session.until((f) => has(f, "EDITED_LINE") && has(f, "未保存"), "dirty editor");
+    assert.ok(has(frame, "app.tsx ●"), "tab shows the dirty marker");
+    assert.equal(fake.files.get("app.tsx"), "export const MARKER_APP_TSX = 1;\n", "nothing is written before Save");
+    assert.equal(fake.calls("studio.fs.write").length, 0);
+
+    await tapText(session, frame, /^保存/);
+    frame = await session.until((f) => has(f, "已保存 app.tsx"), "saved toast");
+    assert.equal(fake.files.get("app.tsx"), "export const EDITED_LINE = 42;\nsecond line\n");
+    assert.deepEqual(fake.calls("studio.fs.write").map((r) => r.params), [{ project: "alpha-app", path: "app.tsx", content: "export const EDITED_LINE = 42;\nsecond line\n" }]);
+    assert.ok(!has(frame, "app.tsx ●") && !has(frame, "未保存"), "clean again after saving");
+    // Our own write came back through fs.watch; it must not raise a conflict or reload.
+    await session.settle(40);
+    frame = await session.frame();
+    assert.ok(!has(frame, "被外部修改"), textOf(frame));
+  } finally { session.kill(); }
+}, 60_000);
+
+test("closing a dirty tab asks first: cancel keeps it, discard drops it, save writes then closes", async () => {
+  const { fake, session } = await boot();
+  try {
+    await openAlpha(session);
+    let frame = await openFile(session, "app.tsx", "MARKER_APP_TSX");
+    frame = await typeInEditor(session, frame, /MARKER_APP_TSX/, "changed one\n");
+    frame = await session.until((f) => has(f, "app.tsx ●"), "dirty");
+
+    await tapText(session, frame, "×");
+    frame = await session.until((f) => has(f, "关闭前保存更改？"), "unsaved prompt");
+    await tapText(session, frame, "取消");
+    await session.until((f) => !has(f, "关闭前保存更改？"), "prompt gone");
+    frame = await session.settle(30); // let the modal's exit transition finish before the next tap
+    assert.ok(has(frame, "app.tsx ●"), "cancel keeps the dirty tab");
+
+    await tapText(session, frame, "×");
+    frame = await session.until((f) => has(f, "关闭前保存更改？"), "unsaved prompt again");
+    await tapText(session, frame, "不保存");
+    frame = await session.until((f) => has(f, "从左侧选择文件开始编辑。"), "tab closed");
+    assert.equal(fake.files.get("app.tsx"), "export const MARKER_APP_TSX = 1;\n", "discard never writes");
+    await session.settle(30);
+
+    frame = await openFile(session, "app.tsx", "MARKER_APP_TSX");
+    frame = await typeInEditor(session, frame, /MARKER_APP_TSX/, "saved on close\n");
+    frame = await session.until((f) => has(f, "app.tsx ●"), "dirty again");
+    await tapText(session, frame, "×");
+    frame = await session.until((f) => has(f, "关闭前保存更改？"), "prompt 3");
+    await tapText(session, frame, "保存");
+    frame = await session.until((f) => has(f, "从左侧选择文件开始编辑。"), "closed after save");
+    assert.equal(fake.files.get("app.tsx"), "saved on close\n");
+  } finally { session.kill(); }
+}, 90_000);
+
+test("switching project with unsaved changes prompts; cancel stays, discard continues", async () => {
+  const { fake, session } = await boot();
+  try {
+    await openAlpha(session);
+    let frame = await openFile(session, "app.tsx", "MARKER_APP_TSX");
+    frame = await typeInEditor(session, frame, /MARKER_APP_TSX/, "unsaved\n");
+    await session.until((f) => has(f, "app.tsx ●"), "dirty");
+
+    frame = await session.frame();
+    await tapText(session, frame, "项目", 0);
+    frame = await session.until((f) => has(f, "新建项目"), "projects page");
+    await tapText(session, frame, "Beta 游戏");
+    frame = await session.until((f) => has(f, "有未保存的更改"), "leave prompt");
+    assert.equal(fake.calls("studio.fs.tree").length, 1, "no new project is loaded while the prompt is open");
+    await tapText(session, frame, "取消");
+    await session.until((f) => !has(f, "有未保存的更改"), "prompt closed");
+    frame = await session.settle(30);
+    assert.ok(has(frame, "新建项目"), "cancel stays on the projects page");
+
+    await tapText(session, frame, "Beta 游戏");
+    frame = await session.until((f) => has(f, "有未保存的更改"), "leave prompt 2");
+    await tapText(session, frame, "不保存，继续");
+    frame = await session.until((f) => has(f, "源码 · beta-game"), "beta opened");
+    assert.deepEqual(fake.calls("studio.fs.tree").map((r) => r.params.project), ["alpha-app", "beta-game"]);
+    assert.ok(!has(frame, "app.tsx ●"));
+  } finally { session.kill(); }
+}, 90_000);

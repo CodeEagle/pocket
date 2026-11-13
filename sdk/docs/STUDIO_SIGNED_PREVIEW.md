@@ -43,6 +43,14 @@ registry are unchanged. The service packages the build with
 `pocket.json` and in source is never touched; it is not part of the bytecode or
 PAK. The least invasive mechanism is just that one option.
 
+### Preview key at service startup (M3)
+
+`startEditor` now calls `previewTrust` before serving, so `keys/editor-preview-key.json` exists as soon as the
+service is up (idempotent; an existing key is never rotated; the private key never leaves the service). A trusted
+host can therefore configure the preview child (`downloadOnOpen`, `updates`, public key) at its own startup instead
+of waiting for the first `preview-publish`. Test: `editor/test/editor_preview_publish.test.ts` ("the preview signing
+key exists right after startup"). Studio use: `studio/docs/ARCHITECTURE.md`, "Preview child and the catalog".
+
 ### Slot, key and build numbers
 
 - **Slot.** Preview packages live in their own `preview` slot under
