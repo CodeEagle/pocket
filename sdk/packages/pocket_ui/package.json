@@ -16,6 +16,7 @@
     "./host": "./src/host.ts",
     "./back-navigation": "./src/back-navigation.ts",
     "./dio": "./src/dio.ts",
+    "./clipboard": "./src/clipboard.ts",
     "./permissions": "./src/permissions.ts",
     "./streams": "./src/streams.ts",
     "./platform-experience": "./src/platform-experience.ts",

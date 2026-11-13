@@ -57,7 +57,7 @@ if "package:pocket_hardware/" in (SDKROOT / "lib/pocket_sdk.dart").read_text():
     errors.append("core SDK must not re-export optional hardware")
 
 hardware_modules = {"camera", "bluetooth", "sensors", "location", "biometrics", "weather"}
-optional_packages = {f"pocket_{name}" for name in hardware_modules} | {"pocket_permissions", "pocket_dio"}
+optional_packages = {f"pocket_{name}" for name in hardware_modules} | {"pocket_permissions", "pocket_dio", "pocket_clipboard"}
 for package in optional_packages:
     if re.search(rf"^  {package}:", (SDKROOT / "pubspec.yaml").read_text(), re.M):
         errors.append(f"core SDK must not statically depend on optional {package}")
