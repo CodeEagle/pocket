@@ -3,7 +3,8 @@
 Date: 2026-11-13. Branch: `ccr-0ab29827-46orrx`, based on `main` at `f59d2df`.
 
 **Status: M0 is not complete.** The audit is done: `PARITY.md`, the capability audit and the
-conflict list below. None of the three spikes has a measured result, so the M0 exit test fails.
+conflict list below. The approved SDK prerequisites for the spikes have landed (section 10). None
+of the three spikes has a measured result yet, because they need macOS, so the M0 exit test fails.
 M1 must not start yet (ground rule 1).
 
 ## 1. Why the spikes have no measurements
@@ -13,8 +14,8 @@ This work ran in a Linux cloud container. All three spikes need things it does n
 | Need | State in this container |
 | --- | --- |
 | macOS Apple Silicon + Flutter (`.fvmrc` pin) | Linux x86_64, no `flutter` or `fvm`. Pocket has no Linux host, so `PocketView` cannot run here at all. |
-| Pinned PocketJS upstream (`scripts/prepare_upstream.py`) | Blocked: the network policy returns 403 for `codeload.github.com`. Without it `buildGuest`, `cargo build` and the Bun tests cannot run. |
-| Native library | `cargo build --locked --lib` fails: it needs `.cache/pocketjs`. |
+| Pinned PocketJS upstream (`scripts/prepare_upstream.py`) | Resolved later: GitHub serves only attached repos to the codeload tarball endpoint. The pinned commit was fetched with git and exported into `sdk/.cache/pocketjs`, then `prepare_upstream.py` applied its patches and contract checks. |
+| Native library | Resolved later: builds once the upstream cache exists. |
 | CJK IME, hardware keyboard | No display or IME. |
 
 Spike results were not estimated or simulated (ground rule 10, AGENTS.md "validate actual JS
@@ -160,16 +161,30 @@ change `studio.fs` chunking and the `studio.preview` shape. Current mapping to r
 
 ## 7. Validation commands run
 
+Initial M0 run: only `check_architecture.py` and `bun install` could run (upstream blocked, no
+Flutter). After the environment was fixed (section 8) the full suite ran twice: on clean `main`
+(`f59d2df` plus docs) and on the branch after all SDK changes. Results below are the branch; every
+failure is also present on `main` unless stated.
+
+Environment notes: Linux x86_64, Flutter 3.47.9, `POCKET_SOURCE_BUILD=1` (the prebuilt
+`@pocket/tools-linux-x64` package is not installed, so `pocket_probe`/`pocketjs_bytecode` are built
+from the pinned source), and Playwright's expected `chromium_headless_shell-1248` pointed at the
+installed 1243 build.
+
 | Command | Result |
 | --- | --- |
 | `python3 sdk/scripts/check_architecture.py` | Pass |
-| `bun install` (sdk) | Pass |
-| `python3 sdk/scripts/prepare_upstream.py` | **Fail:** HTTP 403 from `codeload.github.com` (network policy) |
-| `cargo build --locked --lib`, `cargo test --locked` | Not runnable: needs the upstream cache |
-| `TMPDIR=/tmp bun test` (sdk), `demo/js` tests | Not runnable: needs the upstream compiler |
-| All `flutter test` / `flutter analyze` | Not runnable: no Flutter in this container; no Linux host |
-
-No SDK code was changed in M0.
+| `sdk/native`: `cargo test --locked` | Pass |
+| `sdk`: `flutter test` | Pass |
+| `sdk`: `flutter analyze` | No errors outside `packages/pocket_vn/node_modules` (a `bun install` copy of a Dart package) |
+| `sdk/packages/pocket_flutter`: `POCKET_NATIVE_LIBRARY=… flutter test` | 305 pass, 1 skip (needs a capture fixture dir) |
+| `sdk/packages/pocket_services`: `flutter test` | Pass |
+| `sdk/packages/pocket_clipboard`: `flutter test` | 13 pass |
+| `sdk`: `TMPDIR=/tmp bun test` | Fails on `main` too (59 tests with the browser fix). The branch run's extra failures all pass when the file is run alone on the branch; they were load flakiness or a missing debug `pocket_probe` binary. |
+| `demo`: `flutter test` | Fails on `main` too: `official_demo_catalog_test.dart` |
+| `demo`: `flutter analyze` | 1 error on `main` too: `integration_test/novel_performance_test.dart:79` |
+| `demo/js`: `bun test` | 34 failures, identical on `main` |
+| `demo/js`: `bash scripts/test_guest.sh` | Pass |
 
 ## 8. Owner decisions (2026-11-13)
 
@@ -188,3 +203,21 @@ No SDK code was changed in M0.
 
 M2 and M4 each grow by about one week for the SDK text-input work in 3.1, which has to land before
 either can start. M3 grows by about one week if Spike C needs option (b). The other estimates stand until the spikes report.
+
+## 10. SDK prerequisites landed on this branch
+
+Implemented by Sonnet workers, then a consolidated Sonnet review with fixes. Each has an
+`sdk/docs/` record.
+
+| Commit | Change | Doc |
+| --- | --- | --- |
+| `38ab9b9`, `f43bcd2` | Optional `pocket_clipboard` plugin (`clipboard.readText/hasText/writeText`, separate read/write grants, 192 KiB bound) and `@pocket/ui/clipboard` | `sdk/docs/CLIPBOARD_PLUGIN.md` |
+| `5480400`, `f43bcd2` | Multi-line `InputField`; `PocketView(textLayoutCacheCapacity:)` with cache stats; `modifiers` on `input.text` keys folded into key names; guest-requested raw key/IME sessions (`textInput.rawOpen/rawUpdate/rawClose`) | `sdk/docs/STUDIO_TEXT_INPUT.md` |
+| `ea90f56`, `6de1d65` | Service routes: stat, file delete/move, folders, chunked read and uploads, watch SSE, build cancel, build events SSE, structured diagnostics; async cancellable `buildGuest` (still serialised in-process) with a 15 min timeout | `sdk/docs/EDITOR_FS_AND_BUILD_ROUTES.md` |
+
+Still open before Spike C: the preview child loading path (option a or b in 3.3) is approved but
+not implemented. It needs the Spike C measurement on macOS to choose between them.
+Still open for Spike A: the macOS IME checklist in `sdk/docs/STUDIO_TEXT_INPUT.md`.
+Known residual weakness (unchanged, documented): the constant `x-pocket-editor: 1` header passes
+the write credential check; `status.error`/`logs` can carry absolute paths and must be scrubbed by
+the Studio host provider.
