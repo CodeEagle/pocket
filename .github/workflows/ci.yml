@@ -65,7 +65,11 @@ jobs:
 
       - name: Test native host and worker runtime
         id: native-tests
-        run: cargo test --locked --manifest-path sdk/native/Cargo.toml
+        shell: bash
+        run: |
+          ulimit -c unlimited
+          sudo sysctl -w kernel.core_pattern=/tmp/pocket-native-core.%p
+          cargo test --locked --manifest-path sdk/native/Cargo.toml
 
       - name: Diagnose a native test crash
         if: failure() && steps.native-tests.outcome == 'failure'
@@ -73,7 +77,15 @@ jobs:
         run: |
           cargo test --locked --manifest-path sdk/native/Cargo.toml --lib --no-run --message-format=json > /tmp/native-test-build.jsonl
           test_binary=$(python3 -c 'import json; records=(json.loads(line) for line in open("/tmp/native-test-build.jsonl")); print(next(record["executable"] for record in records if record.get("executable")))')
-          gdb --batch -ex run -ex "thread apply all bt" --args "$test_binary"
+          shopt -s nullglob
+          cores=(/tmp/pocket-native-core.*)
+          if ((${#cores[@]})); then
+            for core in "${cores[@]}"; do
+              gdb --batch -ex "thread apply all bt" "$test_binary" "$core"
+            done
+          else
+            gdb --batch -ex run -ex "thread apply all bt" --args "$test_binary"
+          fi
 
 
   js-sdk-and-guest:
@@ -219,6 +231,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           path: |
+            ${{ runner.temp }}/pocket-studio-upgrade-diagnostics/**
             /tmp/pocket-e2e-real-*/.pocket-build/**/*.log
             /tmp/pocket-e2e-real-*/.pocket-build/**/*.json
 
