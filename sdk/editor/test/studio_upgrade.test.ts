@@ -1947,6 +1947,85 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
     }
   });
 
+  test("shows no downgrade action when the current SDK is newer than the available stable release", { timeout: 30_000 }, async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "pocket-upgrade-ui-version-order-"));
+    const projectRoot = join(tempRoot, "project");
+    mkdirSync(projectRoot, { recursive: true });
+    writeFileSync(join(projectRoot, "pocket.json"), JSON.stringify({ name: "upgrade-ui", title: "Upgrade UI", entry: "app.tsx", version: "0.1.0" }));
+    writeFileSync(join(projectRoot, "app.tsx"), "export default function App() { return null; }\n");
+
+    const snapshots = [
+      { currentVersion: "0.1.16", latestVersion: "0.1.15", upgradeAvailable: false, status: "up-to-date" },
+      { currentVersion: "0.1.10", latestVersion: "0.1.9", upgradeAvailable: false, status: "up-to-date" },
+      { currentVersion: "0.1.10", latestVersion: "0.1.11", upgradeAvailable: true, status: "available" },
+    ];
+    let editor: Awaited<ReturnType<typeof startEditor>> | undefined;
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    try {
+      editor = await startEditor({
+        host: "127.0.0.1",
+        port: 0,
+        projectRoot,
+        workspace: join(tempRoot, ".pocket-build", "workspace"),
+      });
+      browser = await chromium.launch({ headless: true, timeout: 15_000 });
+      const page = await browser.newPage();
+      await page.route("**/api/studio/upgrade/check", async (route) => {
+        const snapshot = snapshots.shift();
+        if (!snapshot) {
+          await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "unexpected extra upgrade check" }) });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            mode: "standalone",
+            autoUpgradeSupported: true,
+            deferredReason: null,
+            error: null,
+            ...snapshot,
+          }),
+        });
+      });
+
+      await page.goto(`http://127.0.0.1:${editor.port}/`, { waitUntil: "domcontentloaded" });
+      const assertNoDowngrade = async (currentVersion: string, latestVersion: string): Promise<void> => {
+        await page.waitForFunction(
+          ({ current, latest }) => {
+            const version = document.getElementById("studio-upgrade-version")?.textContent || "";
+            const status = document.getElementById("studio-upgrade-status")?.textContent || "";
+            return version === `v${current}` && status === `无可用升级；最新已发布稳定版 v${latest}`;
+          },
+          { current: currentVersion, latest: latestVersion },
+          { timeout: 5_000 },
+        );
+        expect(await page.locator("#studio-upgrade-version").textContent()).toBe(`v${currentVersion}`);
+        expect(await page.locator("#studio-upgrade-version").textContent()).not.toContain("→");
+        expect(await page.locator("#studio-upgrade-action").textContent()).toBe("检查更新");
+        expect(await page.locator("#studio-upgrade-action").isEnabled()).toBe(true);
+      };
+
+      await assertNoDowngrade("0.1.16", "0.1.15");
+      await page.locator("#studio-upgrade-action").click();
+      await assertNoDowngrade("0.1.10", "0.1.9");
+
+      await page.locator("#studio-upgrade-action").click();
+      await page.waitForFunction(
+        () => (document.getElementById("studio-upgrade-version")?.textContent || "") === "v0.1.10 → v0.1.11"
+          && (document.getElementById("studio-upgrade-status")?.textContent || "") === "发现新版本 v0.1.11",
+        undefined,
+        { timeout: 5_000 },
+      );
+      expect(await page.locator("#studio-upgrade-action").textContent()).toBe("立即升级");
+      expect(snapshots).toHaveLength(0);
+    } finally {
+      await browser?.close();
+      await editor?.stop(true);
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test("handles post-stage startup failure with real detached CLI rollback and recovers interrupted upgrades only during restart", { timeout: 55_000 }, async () => {
     const standaloneRoot = mkdtempSync(join(tmpdir(), "pocket-e2e-real-rollback-sdk-"));
     const v11BuildRoot = mkdtempSync(join(tmpdir(), "pocket-e2e-real-rollback-v11-"));

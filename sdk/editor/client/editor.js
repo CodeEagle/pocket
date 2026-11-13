@@ -3416,7 +3416,7 @@ function renderStudioUpgrade(snapshot) {
     modeEl.title = reasonText || modeEl.textContent;
   }
 
-  versionEl.textContent = latestVersion && latestVersion !== currentVersion
+  versionEl.textContent = upgradeAvailable && latestVersion
     ? `v${currentVersion} → v${latestVersion}`
     : `v${currentVersion}`;
 
@@ -3482,7 +3482,12 @@ function renderStudioUpgrade(snapshot) {
       buttonLabel = "立即升级";
     }
   } else if (status === "up-to-date") {
-    statusText = autoUpgradeSupported ? "已是最新稳定版" : "已是最新稳定版（当前安装方式不支持自动升级）";
+    if (latestVersion && latestVersion !== currentVersion) {
+      statusText = `无可用升级；最新已发布稳定版 v${latestVersion}`;
+      if (!autoUpgradeSupported) statusText += "（当前安装方式不支持自动升级）";
+    } else {
+      statusText = autoUpgradeSupported ? "已是最新稳定版" : "已是最新稳定版（当前安装方式不支持自动升级）";
+    }
     tone = "good";
     buttonLabel = "检查更新";
   }
