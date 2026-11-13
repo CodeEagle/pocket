@@ -262,6 +262,108 @@ void main() {
     skip: skip,
   );
 
+  testWidgets('package management stages an update without activating it', (
+    tester,
+  ) async {
+    updateServer.releaseBuild = 1;
+    final controller = PocketSystemHostController();
+    final configs = _makeConfigs(
+      fixture: fixture,
+      server: server,
+      rootRecordings: rootRecordings,
+      childRecordings: childRecordings,
+      signals: signals,
+      downloadOnOpen: true,
+    );
+    try {
+      await _pumpHost(tester, controller, configs);
+      await _waitUntil(
+        tester,
+        () => signals.any((event) => event['event'] == 'prewarmed'),
+      );
+      final root = _findInstance(controller, configs.rootId);
+      PocketSystemInstanceSnapshot child() =>
+          _findInstance(controller, configs.childId);
+      await _sendPointer(tester, root.session, x: 72);
+      await _waitUntil(
+        tester,
+        () => child().isPresented && child().session.stage == 'ready',
+      );
+      await _sendPointer(tester, child().session, x: 200);
+      await _waitUntil(
+        tester,
+        () =>
+            !child().isPresented &&
+            signals.any((event) => event['event'] == 'open-settled'),
+      );
+      await _waitUntil(
+        tester,
+        () => _findInstanceOrNull(controller, configs.childId) == null,
+      );
+      updateServer.releaseBuild = 2;
+      final blobsBeforeCheck = updateServer.filePaths
+          .where((path) => path.startsWith('blobs/'))
+          .length;
+      await _sendPointer(tester, root.session, x: 52);
+      await _waitUntil(
+        tester,
+        () => signals.any((event) => event['event'] == 'update-status'),
+      );
+      final status = signals.lastWhere(
+        (event) => event['event'] == 'update-status',
+      );
+      expect(status['installedBuild'], 1, reason: '$status');
+      expect(status['activeBuild'], 1);
+      expect(status['latestBuild'], 2, reason: '$status');
+      expect(status['updateAvailable'], isTrue);
+      expect(
+        updateServer.filePaths
+            .where((path) => path.startsWith('blobs/'))
+            .length,
+        blobsBeforeCheck,
+      );
+
+      await _sendPointer(tester, root.session, x: 36);
+      await _waitUntil(
+        tester,
+        () => signals.any((event) => event['event'] == 'update-prepared'),
+      );
+      final prepared = signals.lastWhere(
+        (event) => event['event'] == 'update-prepared',
+      );
+      expect(prepared['stagedBuild'], 2);
+      expect(_findInstanceOrNull(controller, configs.childId), isNull);
+      signals.removeWhere((event) => event['event'] == 'update-status');
+      await _sendPointer(tester, root.session, x: 52);
+      await _waitUntil(
+        tester,
+        () => signals.any((event) => event['event'] == 'update-status'),
+      );
+      final stagedStatus = signals.lastWhere(
+        (event) => event['event'] == 'update-status',
+      );
+      expect(stagedStatus['installedBuild'], 1);
+      expect(stagedStatus['activeBuild'], 1);
+      expect(stagedStatus['stagedBuild'], 2);
+
+      await _sendPointer(tester, root.session, x: 72);
+      await _waitUntil(
+        tester,
+        () =>
+            _findInstanceOrNull(
+                  controller,
+                  configs.childId,
+                )?.session.active?.build ==
+                2 &&
+            _findInstanceOrNull(controller, configs.childId)?.isPresented ==
+                true,
+      );
+      expect(child().session.active?.build, 2);
+    } finally {
+      await _closeHost(tester, controller);
+    }
+  }, skip: skip);
+
   testWidgets('same signed build in background does not remount the child', (
     tester,
   ) async {

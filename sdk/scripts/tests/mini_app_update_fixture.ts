@@ -17,9 +17,9 @@ import { packageArtifacts } from "../package_update.ts";
  *
  * The root and child are embedded at build 1 and have signed build 1/build 2
  * releases. The SystemUI is therefore exercised through the same signed
- * package path as a remote host bootstrap. A cache-first open presents the
- * embedded/cached v1 while v2 is prepared in the background; returning and
- * reopening consumes the staged signed v2 package.
+ * package path as a remote host bootstrap. Each open checks the signed index
+ * before presenting the child; management RPCs can separately stage a release
+ * without activating it.
  */
 const outputArgument = process.argv[2];
 if (!outputArgument) throw new Error("Pass the fixture output directory");
@@ -177,15 +177,21 @@ async function prepareChildUpdate(): Promise<void> {
   }
 }
 
+async function inspectChildUpdate(): Promise<void> {
+  const status = await platform.getAppUpdateStatus(childAppId, { checkLatest: true });
+  await host.request("fixture.signal", { event: "update-status", ...status });
+}
+
 // Prewarm a real child session so the FFI test can distinguish an immediate
 // cached open from a cold download and later consume a staged package.
 void prewarmChild();
 host.onEvent?.((event) => {
   if (event.method !== "input.pointer" || event.params.phase !== "up") return;
-  // The test sends x=24 for prewarm, x=36 for update preparation, and x=72 to enter.
+  // x=24 prewarms, x=36 stages, x=52 inspects, and x=72 enters the child.
   const x = Number(event.params.x);
   if (x < 32) void prewarmChild();
   else if (x < 48) void prepareChildUpdate();
+  else if (x < 64) void inspectChildUpdate();
   else void openChild();
 });
 
