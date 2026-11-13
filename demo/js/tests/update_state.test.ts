@@ -4,7 +4,7 @@ import { initialDemoState, type DemoState, type Route } from "../state.ts";
 import { showcaseUpdateState } from "../update-state.ts";
 
 const routes = new Set<Route>([
-  "home", "gallery", "about", "bytecode", "updates", "plugins", "stress",
+  "home", "gallery", "about", "bytecode", "updates", "miniapps", "plugins", "stress",
   "performance", "mobile", "transitions", "hardware", "video", "settings",
 ]);
 

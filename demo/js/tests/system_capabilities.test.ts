@@ -266,8 +266,18 @@ test("Showcase buildShowcaseSystemConfiguration and DemoState merge per-app pock
   const config = buildShowcaseSystemConfiguration(undefined, []);
   const profileCatalog = config.manifest.applications.catalog.find((entry) => entry.package === "pocket.demo.profile");
   const lobbyCatalog = config.manifest.applications.catalog.find((entry) => entry.package === "pocket.demo.lobby");
-  assert.deepEqual(profileCatalog?.presentation, { style: "page" }, "profile catalog must inherit presentation.style=page from apps/profile/pocket.json");
-  assert.equal(lobbyCatalog?.presentation, undefined, "lobby catalog has no per-app override and inherits global presets");
+  assert.deepEqual(profileCatalog?.presentation, { title: "Pocket Demo Profile", style: "page" }, "profile catalog must expose its title and inherit presentation.style=page from apps/profile/pocket.json");
+  assert.deepEqual(lobbyCatalog?.presentation, { title: "Pocket Demo Lobby" }, "lobby catalog must expose its manifest title while inheriting global presets");
+  const curatedTitle = buildShowcaseSystemConfiguration({
+    ...config.manifest,
+    applications: {
+      ...config.manifest.applications,
+      catalog: config.manifest.applications.catalog.map((entry) => entry.package === "pocket.demo.profile"
+        ? { ...entry, presentation: { title: "Curated profile title" } }
+        : entry),
+    },
+  }, []).manifest.applications.catalog.find((entry) => entry.package === "pocket.demo.profile");
+  assert.equal(curatedTitle?.presentation?.title, "Curated profile title", "an explicit catalog presentation title must override the manifest title");
 
   // Verify DemoState and persisted appearance round-trip
   let state = initialDemoState();

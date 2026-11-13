@@ -88,6 +88,7 @@ import {
 } from "@pocket/ui/back-navigation";
 import { VideoPage } from "./video-page.tsx";
 import { RecordingPanel } from "./recording-panel.tsx";
+import { MiniAppUpdatesPage } from "./mini-app-updates.tsx";
 import { createPocketPlatformClient, type AppLaunchOptions } from "@pocket/ui/platform";
 import { createPlatformExperience, isUnsupportedPlatformError } from "@pocket/ui/platform-experience";
 import { SystemAppSurfaces } from "@pocket/ui/system-surfaces";
@@ -200,7 +201,7 @@ function paramsOf(message: BridgeMessage): Record<string, unknown> {
 function routeOf(value: unknown): Route | undefined {
   const route = String(value ?? "");
   // `gallery` remains the old probe's compatibility spelling for UI.
-  if (route === "settings" || route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple") return route;
+  if (route === "settings" || route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "miniapps" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple") return route;
   if (route === "ui") return "gallery";
   return undefined;
 }
@@ -1196,6 +1197,8 @@ function App() {
         return <ScrollablePage><HardwarePage state={state} dispatch={dispatch} requestCapability={requestCapability} host={host} experience={experience} /></ScrollablePage>;
       case "video":
         return <VideoPage host={host} platform={platform} onNavigate={navigate} />;
+      case "miniapps":
+        return <MiniAppUpdatesPage platform={platform} system={system} />;
       case "apple":
         return <ApplePage />;
       default:
@@ -1207,6 +1210,7 @@ function App() {
     : route === "gallery" ? "UI Collection"
     : route === "about" ? "Host"
     : route === "settings" ? "Settings"
+    : route === "miniapps" ? "MiniApp versions"
     : route === "mobile" ? "Mobile UI"
     : route === "transitions" ? "Transitions"
     : route === "hardware" ? "Hardware"
@@ -1457,6 +1461,11 @@ function PlatformAppsCard(props: {
         <MobileButton label="Open profile app" onPress={() => void open("pocket.demo.profile")} />
         <MobileButton label="Open lobby app" kind="text" onPress={() => void open("pocket.demo.lobby")} />
         <MobileButton label="雾港末班信 · Visual Novel" kind="tonal" onPress={() => void open("pocket.demo.lantern")} />
+        <MobileButton
+          label="Manage MiniApp versions"
+          kind="outlined"
+          onPress={() => props.dispatch({ type: "navigate", route: "miniapps" })}
+        />
       </View>
       <View
         class={theme().name === "dark"

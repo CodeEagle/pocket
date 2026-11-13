@@ -14,6 +14,7 @@ export type Route =
   | "about"
   | "bytecode"
   | "updates"
+  | "miniapps"
   | "plugins"
   | "stress"
   | "performance"

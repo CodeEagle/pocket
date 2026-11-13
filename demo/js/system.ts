@@ -31,8 +31,15 @@ function manifestPresentationOf(appManifest: unknown): JsonObject | undefined {
     ? record.app as Record<string, unknown>
     : undefined;
   const rawPresentation = appSection?.presentation ?? record.presentation;
-  if (!rawPresentation || typeof rawPresentation !== "object" || Array.isArray(rawPresentation)) return undefined;
-  return { ...(rawPresentation as JsonObject) };
+  const presentation = rawPresentation && typeof rawPresentation === "object" && !Array.isArray(rawPresentation)
+    ? rawPresentation as JsonObject
+    : undefined;
+  const title = typeof record.title === "string" ? record.title : undefined;
+  if (!presentation && !title) return undefined;
+  return {
+    ...(title ? { title } : {}),
+    ...(presentation ?? {}),
+  };
 }
 
 function presentationOf(demo: OfficialDemo): JsonObject {

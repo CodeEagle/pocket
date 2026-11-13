@@ -101,7 +101,7 @@ test("primary tabs reset navigation history and appearance survives page changes
 });
 
 test("deep secondary navigation retains the caller and pops one page at a time", () => {
-  const routes = ["mobile", "transitions", "hardware", "video", "bytecode", "updates", "plugins", "stress", "performance"] as const;
+  const routes = ["mobile", "transitions", "hardware", "video", "miniapps", "bytecode", "updates", "plugins", "stress", "performance"] as const;
   let state = initialDemoState();
   for (const route of routes) state = apply(state, { type: "navigate", route });
   assert.deepEqual(state.routeStack, ["home", ...routes]);
