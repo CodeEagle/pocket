@@ -424,6 +424,50 @@ void main() {
     expect(tester.testTextInput.hasAnyClients, isFalse);
   });
 
+  testWidgets('disabling inputEnabled dismisses the IME session', (
+    tester,
+  ) async {
+    final runtime = _RawRuntime(
+      initialEvents: <PocketEvent>[_event('textInput.rawOpen', _rawOpen('r1'))],
+    );
+    await _pump(tester, runtime);
+    expect(tester.testTextInput.hasAnyClients, isTrue);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 320,
+          height: 480,
+          child: PocketView(
+            runtime: runtime,
+            jsSource: '',
+            pakBytes: Uint8List(0),
+            inputEnabled: false,
+            showDebugFps: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(runtime.named('textInput.rawDismiss'), <Map<String, dynamic>>[
+      <String, dynamic>{'id': 'r1', 'reason': 'unavailable'},
+    ]);
+    expect(tester.testTextInput.hasAnyClients, isFalse);
+    // A late IME commit must not reach the guest as input.text.
+    runtime.messages.clear();
+    await _deltas(tester, <Map<String, dynamic>>[
+      _delta(
+        oldText: '',
+        deltaText: 'x',
+        start: 0,
+        end: 0,
+        selection: 1,
+      ),
+    ]);
+    await tester.pump();
+    expect(runtime.textEvents, isEmpty);
+  });
+
   testWidgets('rawClose detaches the IME and restores button keys', (
     tester,
   ) async {

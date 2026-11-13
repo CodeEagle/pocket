@@ -1556,6 +1556,7 @@ class _PocketViewState extends State<PocketView>
     if (oldWidget.inputEnabled && !widget.inputEnabled) {
       _cancelPointerSequences();
       _clearKeyboardButtons();
+      _dismissRawTextInput(reason: 'unavailable', rebuild: false);
       _dismissTextInput(reason: 'focus.lost', rebuild: false);
     }
     if (oldWidget.keyboardInputEnabled && !widget.keyboardInputEnabled) {
