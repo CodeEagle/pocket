@@ -183,3 +183,43 @@ test("guest manifest declares exactly the capabilities the Dart provider registe
   assert.deepEqual(declared, names);
   assert.ok(names.length >= 37);
 });
+
+test("incremental sha256 equals one-shot across arbitrary update boundaries", async () => {
+  const { Sha256 } = await import("../src/sha256.ts");
+  const bytes = new Uint8Array(randomBytes(10_000));
+  for (const step of [1, 7, 63, 64, 65, 1000]) {
+    const hasher = new Sha256();
+    for (let i = 0; i < bytes.length; i += step) hasher.update(bytes.subarray(i, Math.min(i + step, bytes.length)));
+    assert.equal(hasher.hex(), createHash("sha256").update(bytes).digest("hex"), `step ${step}`);
+  }
+});
+
+test("large writes and reads work in bounded slices: every slice yields a turn, multibyte text is never cut", async () => {
+  // 600 KB of text with 3- and 4-byte characters at every offset class.
+  const text = Array.from({ length: 30_000 }, (_, i) => `行${i}😀é\n`).join("");
+  const bytes = Buffer.from(text);
+  let upload: Buffer[] = [];
+  let begun: any;
+  const { host, calls } = fakeHost((c) => {
+    if (c.capability === "studio.fs.upload.begin") { begun = c.params; return { uploadId: "u", chunkBytes: CHUNK_BYTES }; }
+    if (c.capability === "studio.fs.upload.chunk") { upload.push(Buffer.from(c.params.data, "base64")); return { received: 0, totalBytes: 0 }; }
+    if (c.capability === "studio.fs.upload.commit") return { path: "big.ts", bytes: bytes.length, sha256: begun.sha256, revision: 2 };
+    if (c.capability === "studio.fs.readChunk") {
+      const length = Math.min(c.params.length, bytes.length - c.params.offset);
+      return { path: "big.ts", offset: c.params.offset, length, totalBytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), mtimeMs: 1, data: bytes.subarray(c.params.offset, c.params.offset + length).toString("base64") };
+    }
+    throw new Error(c.capability);
+  });
+  let yields = 0;
+  const client = createStudioClient(host, undefined, { yieldTurn: async () => { yields += 1; } });
+  const result = await client.fs.writeText("p", "big.ts", text);
+  assert.equal(result.bytes, bytes.length);
+  assert.equal(begun.sha256, createHash("sha256").update(bytes).digest("hex"));
+  assert.equal(Buffer.concat(upload).toString("utf8"), text);
+  const writeYields = yields;
+  assert.ok(writeYields >= Math.floor(bytes.length / (64 * 1024)), `encode and hash yield per slice (${writeYields})`);
+  const read = await client.fs.readText("p", "big.ts", 4 * 1024 * 1024, bytes.length);
+  assert.equal(read.text, text);
+  assert.ok(yields > writeYields, "hashing and decoding on read yield too");
+  assert.ok(calls.some((c) => c.capability === "studio.fs.readChunk"));
+});

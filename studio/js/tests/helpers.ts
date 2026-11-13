@@ -35,8 +35,10 @@ export async function typeInEditor(session: ProbeSession, frame: Frame, shellTex
 }
 
 /** A fake studio service wired to a booted probe session. */
-export async function boot(setup?: (fake: FakeStudio) => void): Promise<{ fake: FakeStudio; session: ProbeSession }> {
+export async function boot(setup?: (fake: FakeStudio) => void, editor: "input" | "code" = "input"): Promise<{ fake: FakeStudio; session: ProbeSession }> {
   const fake = new FakeStudio();
+  // The M2/M3 workflow tests drive the InputField, so they store editor:"input"; code-pane tests pass "code" (the product default).
+  fake.storage.set("studio.settings.v1", { editor });
   setup?.(fake);
   const session = new ProbeSession(fake.handle);
   fake.attach(session);

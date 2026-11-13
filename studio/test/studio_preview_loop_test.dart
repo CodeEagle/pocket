@@ -160,6 +160,7 @@ void main() {
     await tapAt(30, 244);
     await shot('settings');
     await tapAt(140, 74);
+    await tapAt(300, 314); // editor: the multi-line InputField (the default is the CodeView; this M3 test types through the text overlay)
     await pumpFor(const Duration(seconds: 1));
     await shot('settings-autobuild');
 

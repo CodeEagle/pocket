@@ -18,13 +18,13 @@ export interface StudioSettings {
   debounceMs: number;
   /** Show the live preview beside the editor instead of only on the Preview page. */
   dockPreview: boolean;
-  /** Editor widget: the multi-line InputField now; "code" is the M4 CodeView. */
+  /** Editor widget: "code" is the CodeView (default since M4); "input" is the M2 multi-line InputField fallback. */
   editor: "input" | "code";
 }
 export interface SettingsState extends StudioSettings { loaded: boolean; persistence: "unknown" | "ok" | "unavailable" }
 
 export const SETTINGS_KEY = "studio.settings.v1";
-export const DEFAULT_SETTINGS: StudioSettings = { autoBuild: false, debounceMs: 800, dockPreview: true, editor: "input" };
+export const DEFAULT_SETTINGS: StudioSettings = { autoBuild: false, debounceMs: 800, dockPreview: true, editor: "code" };
 export const DEBOUNCE_CHOICES: readonly number[] = [300, 800, 2000];
 
 export function parseSettings(value: unknown): StudioSettings {
@@ -34,7 +34,8 @@ export function parseSettings(value: unknown): StudioSettings {
     autoBuild: r.autoBuild === true,
     debounceMs: debounce,
     dockPreview: r.dockPreview === false ? false : DEFAULT_SETTINGS.dockPreview,
-    editor: r.editor === "code" ? "code" : "input",
+    // Stored settings from M2/M3 have no (or "input") editor: absent migrates to the new default, an explicit choice stays.
+    editor: r.editor === "input" ? "input" : "code",
   };
 }
 

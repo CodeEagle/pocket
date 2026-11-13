@@ -5,7 +5,7 @@ import { RingBuffer } from "../src/state/ring.ts";
 import { openResilient } from "../src/state/resilient.ts";
 import { createToasts } from "../src/state/toasts.ts";
 import { createDialogs } from "../src/state/dialogs.ts";
-import { createWorkspace, isDirty, MAX_EDIT_BYTES } from "../src/state/workspace.ts";
+import { createWorkspace, diffEdit, isDirty, MAX_CODE_BYTES, MAX_INPUT_BYTES } from "../src/state/workspace.ts";
 import { createBuild, LOG_CAPACITY } from "../src/state/build.ts";
 import { createPreview, type PreviewRuntime } from "../src/state/preview.ts";
 import { createSettings, DEFAULT_SETTINGS, parseSettings, SETTINGS_KEY } from "../src/state/settings.ts";
@@ -128,15 +128,33 @@ describe("toasts and dialogs", () => {
   });
 });
 
-function workspaceFixture(initial: Record<string, string> = { "a.ts": "A\n", "b.ts": "B\n" }) {
+function workspaceFixture(initial: Record<string, string> = { "a.ts": "A\n", "b.ts": "B\n" }, kind: "input" | "code" = "input") {
   const fake = createFakeClient();
   for (const [k, v] of Object.entries(initial)) fake.files.set(k, v);
   const timers = createManualTimers();
   const toasts = createToasts(timers);
   const dialogs = createDialogs();
-  const ws = createWorkspace({ client: fake.client, toasts, dialogs, timers });
+  const ws = createWorkspace({ client: fake.client, toasts, dialogs, timers, editorKind: () => kind });
   return { fake, timers, toasts, dialogs, ws };
 }
+
+describe("sliced work (guest turn budget)", () => {
+  test("diffEdit finds the minimal middle edit, never cuts a surrogate pair, and reconstructs the target", () => {
+    const cases: [string, string][] = [
+      ["abc", "abc"], ["", "x"], ["x", ""], ["one\ntwo\nthree", "one\nTWO\nthree"], ["aaaa", "aaaaa"], ["aaaa", "aa"],
+      ["x\u{1F600}y", "x\u{1F601}y"], ["\u{1F600}", "\u{1F600}\u{1F600}"], ["head" + "z".repeat(5000) + "tail", "head" + "z".repeat(4999) + "Qtail"],
+    ];
+    for (const [before, after] of cases) {
+      const edit = diffEdit(before, after);
+      if (before === after) { expect(edit).toBeUndefined(); continue; }
+      expect(before.slice(0, edit!.from) + edit!.text + before.slice(edit!.to)).toBe(after);
+      const high = (c: number) => c >= 0xd800 && c <= 0xdbff, low = (c: number) => c >= 0xdc00 && c <= 0xdfff;
+      expect(edit!.from === 0 || !high(before.charCodeAt(edit!.from - 1))).toBe(true);
+      expect(edit!.to >= before.length || !low(before.charCodeAt(edit!.to))).toBe(true);
+    }
+    expect(diffEdit("one\ntwo\nthree", "one\nTWO\nthree")).toEqual({ from: 4, to: 7, text: "TWO" });
+  });
+});
 
 describe("workspace", () => {
   test("open, edit, dirty, save writes through writeText; saved listeners fire; save failure keeps it dirty with an error toast", async () => {
@@ -165,13 +183,13 @@ describe("workspace", () => {
     await ws.load("p");
     fake.files.set("big.ts", "b");
     await ws.refreshTree();
-    ws.store.update({ files: [...ws.state().files.filter((f) => f.path !== "big.ts"), { path: "big.ts", bytes: MAX_EDIT_BYTES + 1 }] });
+    ws.store.update({ files: [...ws.state().files.filter((f) => f.path !== "big.ts"), { path: "big.ts", bytes: MAX_INPUT_BYTES + 1 }] });
     await ws.open("big.ts");
     expect(ws.docOf("big.ts")).toMatchObject({ status: "blocked" });
-    expect(ws.docOf("big.ts")!.message).toContain("InputField");
+    expect(ws.docOf("big.ts")!.message).toContain("多行输入框");
     expect(fake.count("readText")).toBe(0);
     await ws.open("small.ts");
-    expect(fake.calls.find((c) => c.name === "readText")!.args).toEqual(["p", "small.ts", MAX_EDIT_BYTES, 1]);
+    expect(fake.calls.find((c) => c.name === "readText")!.args).toEqual(["p", "small.ts", MAX_INPUT_BYTES, 1]);
     ws.unload();
   });
 
@@ -255,6 +273,100 @@ describe("workspace", () => {
     expect(fake.files.get("a.ts")).toBe("theirs 4\n");
     ws.unload();
     void saving;
+  });
+
+  test("code editor buffer: dirty follows the buffer version, save writes the buffer text, edits during a write stay dirty", async () => {
+    const { fake, ws } = workspaceFixture({ "a.ts": "line1\nline2\n" }, "code");
+    await ws.load("p");
+    await ws.open("a.ts");
+    const editor = ws.editorFor("a.ts");
+    expect(ws.editorFor("a.ts")).toBe(editor); // one buffer per document, kept across tab switches
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(false);
+    editor.handleInput({ kind: "commit", text: "X" });
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(true);
+    expect(ws.docOf("a.ts")!.text).toBe("line1\nline2\n"); // the doc text is a snapshot, not per-keystroke state
+    expect(ws.textOf("a.ts")).toBe("Xline1\nline2\n");
+    const saving = ws.save("a.ts");
+    editor.handleInput({ kind: "commit", text: "Y" }); // typed while the write is in flight
+    expect(await saving).toBe(true);
+    expect(fake.files.get("a.ts")).toBe("Xline1\nline2\n");
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(true);
+    expect(await ws.save("a.ts")).toBe(true);
+    expect(fake.files.get("a.ts")).toBe("XYline1\nline2\n");
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(false);
+    ws.unload();
+  });
+
+  test("code editor buffer: CRLF files are written back with CRLF", async () => {
+    const { fake, ws } = workspaceFixture({ "w.ts": "a\r\nb\r\n" }, "code");
+    await ws.load("p");
+    await ws.open("w.ts");
+    ws.editorFor("w.ts").handleInput({ kind: "commit", text: "Z" });
+    await ws.save("w.ts");
+    expect(fake.files.get("w.ts")).toBe("Za\r\nb\r\n");
+    ws.unload();
+  });
+
+  test("code editor buffer: an external change reloads a clean tab as ONE undoable edit; a dirty tab conflicts", async () => {
+    const { fake, ws, timers } = workspaceFixture({ "a.ts": "one\ntwo\nthree\n" }, "code");
+    await ws.load("p");
+    await ws.open("a.ts");
+    const editor = ws.editorFor("a.ts");
+    fake.external("a.ts", "one\nTWO\nthree\n");
+    timers.advance(200); await flush();
+    expect(ws.textOf("a.ts")).toBe("one\nTWO\nthree\n");
+    expect(ws.docOf("a.ts")).toMatchObject({ saved: "one\nTWO\nthree\n", bufferDirty: false, reload: 1 });
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(false);
+    // Undo reverts the reload (history is intact) and the tab then shows as modified against the new disk text.
+    expect(editor.undo()).toBe(true);
+    expect(ws.textOf("a.ts")).toBe("one\ntwo\nthree\n");
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(true);
+    expect(editor.redo()).toBe(true);
+    // Dirty + external change: banner, buffer untouched; "load disk" replaces it, "keep mine" keeps it dirty.
+    editor.handleInput({ kind: "commit", text: "!" });
+    fake.external("a.ts", "disk A\n");
+    timers.advance(200); await flush();
+    expect(ws.docOf("a.ts")!.conflict).toMatchObject({ kind: "changed", theirs: "disk A\n" });
+    expect(ws.textOf("a.ts")).toBe("!one\nTWO\nthree\n");
+    ws.resolveConflict("a.ts", "theirs");
+    expect(ws.textOf("a.ts")).toBe("disk A\n");
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(false);
+    editor.handleInput({ kind: "commit", text: "mine " });
+    fake.external("a.ts", "disk B\n");
+    timers.advance(200); await flush();
+    ws.resolveConflict("a.ts", "mine");
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(true);
+    expect(await ws.save("a.ts")).toBe(true);
+    expect(fake.files.get("a.ts")).toBe("mine disk A\n");
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(false);
+    ws.unload();
+  });
+
+  test("code editor buffer: rename keeps the buffer; releasing hands the text to the InputField; large files go up to the 4 MiB cap", async () => {
+    const { fake, ws } = workspaceFixture({ "a.ts": "A\n" }, "code");
+    await ws.load("p");
+    await ws.open("a.ts");
+    const editor = ws.editorFor("a.ts");
+    editor.handleInput({ kind: "commit", text: "q" });
+    ws.releaseEditors();
+    expect(ws.docOf("a.ts")).toMatchObject({ text: "qA\n", buffered: false });
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(true);
+    const again = ws.editorFor("a.ts"); // switching back: a new buffer from the text, still dirty
+    expect(ws.textOf("a.ts")).toBe("qA\n");
+    expect(isDirty(ws.docOf("a.ts")!)).toBe(true);
+    again.handleInput({ kind: "commit", text: "r" });
+    expect(await ws.save("a.ts")).toBe(true);
+    expect(fake.files.get("a.ts")).toBe("rqA\n");
+
+    fake.files.set("big.ts", "b");
+    await ws.refreshTree();
+    ws.store.update({ files: [...ws.state().files.filter((f) => f.path !== "big.ts"), { path: "big.ts", bytes: MAX_INPUT_BYTES + 1 }, { path: "huge.ts", bytes: MAX_CODE_BYTES + 1 }] });
+    await ws.open("big.ts");
+    expect(ws.docOf("big.ts")).toMatchObject({ status: "ready" }); // above the InputField cap, below the code cap
+    await ws.open("huge.ts");
+    expect(ws.docOf("huge.ts")).toMatchObject({ status: "blocked" });
+    expect(ws.docOf("huge.ts")!.message).toContain("4 MiB");
+    ws.unload();
   });
 
   test("watch: external delete closes a clean tab and flags a dirty one; external create updates the tree; resync after a drop", async () => {
@@ -520,6 +632,10 @@ describe("preview", () => {
 describe("settings", () => {
   test("parse defaults, clamp, persist, and report an unavailable store", async () => {
     expect(parseSettings(null)).toEqual(DEFAULT_SETTINGS);
+    expect(DEFAULT_SETTINGS.editor).toBe("code");
+    expect(parseSettings({ autoBuild: true, debounceMs: 300, dockPreview: true }).editor).toBe("code"); // M2/M3 stored value without `editor`
+    expect(parseSettings({ editor: "input" }).editor).toBe("input");
+    expect(parseSettings({ editor: "bogus" }).editor).toBe("code");
     expect(parseSettings({ autoBuild: true, debounceMs: 99999, dockPreview: false, editor: "code" })).toEqual({ autoBuild: true, debounceMs: 10000, dockPreview: false, editor: "code" });
     const timers = createManualTimers();
     const toasts = createToasts(timers);

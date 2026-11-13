@@ -8,7 +8,7 @@ import { PreviewSurface, PREVIEW_PHASE_LABEL } from "../components/preview-surfa
 import { resolveEditor, type EditorPaneProps } from "../components/editor-pane.tsx";
 import { C } from "../ui/theme.ts";
 import type { Studio } from "../state/studio.ts";
-import { isDirty } from "../state/workspace.ts";
+import { isDirty, MAX_INPUT_BYTES } from "../state/workspace.ts";
 
 /** Editor pane for the active document: banners, then the swappable editor widget. */
 function ActiveEditor(props: { studio: Studio }) {
@@ -19,6 +19,8 @@ function ActiveEditor(props: { studio: Studio }) {
   const doc = () => ws().docs.find((d) => d.path === ws().active);
   // A component (not a call in JSX) so edits update props instead of recreating the editor widget.
   const Editor = (p: EditorPaneProps) => resolveEditor(settings().editor).pane(p);
+  // A document opened under the code editor can exceed what the InputField can shape; say so instead of freezing it.
+  const tooBigForInput = () => settings().editor === "input" && (doc()?.bytes ?? 0) > MAX_INPUT_BYTES;
   const own = () => build().diagnostics.filter((d) => d.file === doc()?.path);
   return (
     <Show when={doc()} fallback={<Text class="text-sm" style={{ textColor: C.muted }}>从左侧选择文件开始编辑。</Text>}>
@@ -37,9 +39,19 @@ function ActiveEditor(props: { studio: Studio }) {
           <Show when={d().status === "blocked" || d().status === "error"}><Text class="text-sm" style={{ textColor: C.warn }}>{d().message ?? "无法打开"}</Text></Show>
           <Show when={d().status === "ready"}>
             <Text class="text-xs" style={{ textColor: C.muted }}>{`${d().path} · ${d().bytes} 字节${isDirty(d()) ? " · 未保存" : ""}${d().saving ? " · 保存中…" : ""}`}</Text>
-            <ScrollablePage>
-              <Editor path={d().path} text={d().text} onChange={(t) => s.workspace.setText(d().path, t)} onSave={() => void s.workspace.save(d().path)} diagnostics={own()} jump={d().jump} />
-            </ScrollablePage>
+            <Show when={!tooBigForInput()} fallback={<Text class="text-sm" style={{ textColor: C.warn }}>此文件超过多行输入框的 1 MiB 上限：请在“设置”中切换到“代码视图”编辑器。</Text>}>
+              <Show
+                when={resolveEditor(settings().editor).selfScrolling}
+                fallback={<ScrollablePage><Editor path={d().path} text={d().text} onChange={(t) => s.workspace.setText(d().path, t)} onSave={() => void s.workspace.save(d().path)} diagnostics={own()} jump={d().jump} /></ScrollablePage>}
+              >
+                <View class="flex-col flex-1">
+                  <Editor
+                    path={d().path} text={d().text} onChange={(t) => s.workspace.setText(d().path, t)} onSave={() => void s.workspace.save(d().path)}
+                    diagnostics={own()} jump={d().jump} buffer={(path) => s.workspace.editorFor(path)} reload={d().reload} clipboard={s.clipboard}
+                  />
+                </View>
+              </Show>
+            </Show>
           </Show>
         </View>
       )}

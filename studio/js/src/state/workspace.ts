@@ -7,9 +7,13 @@ import type { Toasts } from "./toasts.ts";
 import type { Dialogs } from "./dialogs.ts";
 import { StudioError, type FileEntry, type StudioClient, type WatchEvent } from "../studio-client.ts";
 import { basename, dirname, isInside, join, validateNewPath } from "../lib/path.ts";
+import { CodeEditor, TextBuffer, single } from "@pocket/ui/code";
 
-/** InputField editor cap. The Pocket-native CodeView (M4) lifts it. */
-export const MAX_EDIT_BYTES = 1024 * 1024;
+/** InputField editor cap (it shapes the whole text in one widget). */
+export const MAX_INPUT_BYTES = 1024 * 1024;
+/** CodeView cap: the core is verified at 2 MiB / 5,000 lines; 4 MiB is the sane upper bound, with a clear message above it. */
+export const MAX_CODE_BYTES = 4 * 1024 * 1024;
+export type EditorKind = "input" | "code";
 
 export function errorText(error: unknown): string {
   const e = error as { code?: string; message?: string };
@@ -29,6 +33,15 @@ export interface Doc {
   saving: boolean;
   conflict?: { kind: "changed" | "deleted"; theirs?: string };
   jump?: JumpTarget;
+  /**
+   * Code editor mode: a CodeEditor buffer (see `createWorkspace().editorFor`) holds the live text, so
+   * `text` is only a snapshot (taken at open, save, reload and when the InputField takes over).
+   * `bufferDirty` is `buffer.version !== savedVersion`, patched only when it flips.
+   */
+  buffered?: boolean;
+  bufferDirty?: boolean;
+  /** Incremented when the buffer was replaced from outside (external reload); the pane refreshes. */
+  reload?: number;
 }
 export interface AssetInfo { name: string; path: string; bytes?: number; mtimeMs?: number; error?: string }
 
@@ -54,18 +67,53 @@ export interface WorkspaceDeps {
   toasts: Toasts;
   dialogs: Dialogs;
   timers: Timers;
+  /** Which editor widget is active; decides the file-size cap. Default: code. */
+  editorKind?: () => EditorKind;
 }
 
-export const isDirty = (doc: Doc): boolean => doc.status === "ready" && doc.text !== doc.saved;
+export const isDirty = (doc: Doc): boolean => doc.status === "ready" && (doc.buffered ? doc.bufferDirty === true : doc.text !== doc.saved);
+
+/**
+ * One undoable edit turning `before` into `after`: the common prefix and suffix stay untouched. The prefix and
+ * suffix are found by binary search over native `startsWith`/`endsWith`, because a char-by-char loop over a
+ * multi-MiB identical prefix would exceed the guest's 250 ms per-turn budget.
+ */
+export function diffEdit(before: string, after: string): { from: number; to: number; text: string } | undefined {
+  if (before === after) return undefined;
+  const max = Math.min(before.length, after.length);
+  let lo = 0, hi = max;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (before.startsWith(after.slice(0, mid))) lo = mid; else hi = mid - 1;
+  }
+  let head = lo;
+  const isHigh = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
+  if (head > 0 && isHigh(before.charCodeAt(head - 1))) head -= 1; // never cut a surrogate pair
+  const room = max - head;
+  lo = 0; hi = room;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (before.endsWith(after.slice(after.length - mid))) lo = mid; else hi = mid - 1;
+  }
+  let tail = lo;
+  if (tail > 0) {
+    const first = before.charCodeAt(before.length - tail);
+    if (first >= 0xdc00 && first <= 0xdfff) tail -= 1; // the suffix must not start inside a pair either
+  }
+  return { from: head, to: before.length - tail, text: after.slice(head, after.length - tail) };
+}
 
 export function createWorkspace(deps: WorkspaceDeps) {
   const { client, toasts, dialogs, timers } = deps;
+  const maxBytes = (): number => ((deps.editorKind?.() ?? "code") === "code" ? MAX_CODE_BYTES : MAX_INPUT_BYTES);
   const store = createStore<WorkspaceState>({
     files: [], assets: [], emptyFolders: [], revision: 0, treeLoading: false, expanded: new Set<string>(), docs: [], watch: "off",
   });
   const savedListeners = new Set<(path: string) => void>();
   let watcher: { close(): void } | undefined;
   let jumpSeq = 0;
+  // Code editor buffers by path. They outlive tab switches (undo history, selection) and die with the doc.
+  const live = new Map<string, { editor: CodeEditor; path: string; savedVersion: number; stop: () => void }>();
   // Per-load token: results that arrive after the project changed are dropped.
   let epoch = 0;
 
@@ -75,6 +123,70 @@ export function createWorkspace(deps: WorkspaceDeps) {
   function patchDoc(path: string, patch: Partial<Doc>): void {
     store.update({ docs: state().docs.map((d) => (d.path === path ? { ...d, ...patch } : d)) });
   }
+  // ---- code editor buffers ----------------------------------------------
+  const textOf = (path: string): string | undefined => {
+    const entry = live.get(path);
+    return entry ? entry.editor.buffer.toString() : docOf(path)?.text;
+  };
+  function dropLive(path: string, snapshot = false): void {
+    const entry = live.get(path);
+    if (!entry) return;
+    entry.stop();
+    live.delete(path);
+    if (snapshot && docOf(path)) patchDoc(path, { text: entry.editor.buffer.toString(), buffered: false, bufferDirty: undefined });
+  }
+  /**
+   * The CodeEditor of an open document (created from its text on first use). The buffer is the source of
+   * truth while it exists: dirty is `buffer.version !== savedVersion`, so a keystroke patches the store only
+   * when the dirty flag flips, and the text is materialized only on save / reload / hand-over.
+   */
+  function editorFor(path: string): CodeEditor {
+    const have = live.get(path);
+    if (have) return have.editor;
+    const doc = docOf(path);
+    const editor = new CodeEditor(doc?.text ?? "", { platform: "mac" });
+    const dirty = !!doc && doc.text !== doc.saved;
+    const entry = { editor, path, savedVersion: dirty ? -1 : editor.buffer.version, stop: (): void => undefined };
+    const stop = editor.buffer.onChange(() => {
+      const now = editor.buffer.version !== entry.savedVersion;
+      if (docOf(entry.path)?.bufferDirty !== now) patchDoc(entry.path, { bufferDirty: now });
+    });
+    entry.stop = stop;
+    live.set(path, entry);
+    if (doc) patchDoc(path, { buffered: true, bufferDirty: dirty });
+    return editor;
+  }
+  /** Hands every buffer's text back to the docs (used when the InputField takes over). */
+  function releaseEditors(): void { for (const path of [...live.keys()]) dropLive(path, true); }
+  /** The disk text is now the baseline of the document: it is clean at the buffer's current version. */
+  function markBufferSaved(path: string, text: string, bytes: number | undefined): void {
+    const entry = live.get(path);
+    if (entry) entry.savedVersion = entry.editor.buffer.version;
+    patchDoc(path, { saved: text, ...(bytes !== undefined ? { bytes } : {}), conflict: undefined, ...(entry ? { text, bufferDirty: false } : {}) });
+  }
+  /**
+   * Replaces the document content from outside (external reload, "load disk version"). With a buffer this is ONE
+   * undoable edit over the changed middle (common prefix and suffix are untouched), so Cmd+Z returns to the text
+   * before the reload and then shows the tab as modified; selection stays where it is when it lies outside the edit.
+   */
+  function replaceContent(path: string, text: string, bytes: number | undefined): void {
+    const entry = live.get(path);
+    if (!entry) { patchDoc(path, { text, saved: text, ...(bytes !== undefined ? { bytes } : {}), conflict: undefined }); return; }
+    const { buffer } = entry.editor;
+    const incoming = new TextBuffer(text);
+    const edit = diffEdit(buffer.getText(), incoming.getText());
+    if (edit) {
+      const head = entry.editor.selection.ranges[entry.editor.selection.primary]?.head ?? 0;
+      const delta = edit.text.length - (edit.to - edit.from);
+      const next = head <= edit.from ? head : head >= edit.to ? head + delta : edit.from;
+      entry.editor.dispatch({ edits: [edit], selection: single(next), kind: "other" });
+    }
+    buffer.eol = incoming.eol;
+    buffer.mixedEol = incoming.mixedEol;
+    markBufferSaved(path, text, bytes);
+    patchDoc(path, { reload: (docOf(path)?.reload ?? 0) + 1 });
+  }
+
   function removeEmptyFoldersCovered(files: FileEntry[], folders: string[]): string[] {
     return folders.filter((folder) => !files.some((f) => isInside(folder, f.path)));
   }
@@ -116,6 +228,7 @@ export function createWorkspace(deps: WorkspaceDeps) {
     flushTimer?.();
     flushTimer = undefined;
     pending.paths.clear();
+    for (const path of [...live.keys()]) dropLive(path);
     store.set({ files: [], assets: [], emptyFolders: [], revision: 0, treeLoading: false, expanded: new Set<string>(), docs: [], watch: "off" });
   }
 
@@ -145,16 +258,14 @@ export function createWorkspace(deps: WorkspaceDeps) {
     const entry = state().files.find((f) => f.path === path);
     const base: Doc = { path, text: "", saved: "", bytes: entry?.bytes ?? 0, status: "loading", saving: false, ...(target ? { jump: target } : {}) };
     store.update({ docs: [...state().docs, base], active: path, selected: path, selectedKind: "file" });
-    if (entry && entry.bytes > MAX_EDIT_BYTES) {
-      patchDoc(path, {
-        status: "blocked",
-        message: `文件为 ${Math.ceil(entry.bytes / 1024)} KiB，超过当前 InputField 编辑器的 ${MAX_EDIT_BYTES / 1024} KiB 上限。Pocket 原生代码编辑器（CodeView）将解除此限制。`,
-      });
+    const cap = maxBytes();
+    if (entry && entry.bytes > cap) {
+      patchDoc(path, { status: "blocked", message: tooLargeMessage(entry.bytes, cap) });
       return;
     }
     const mine = epoch;
     try {
-      const read = await client.fs.readText(project, path, MAX_EDIT_BYTES, entry?.bytes);
+      const read = await client.fs.readText(project, path, cap, entry?.bytes);
       if (mine !== epoch || !docOf(path)) return;
       patchDoc(path, { text: read.text, saved: read.text, bytes: read.bytes, status: "ready" });
     } catch (error) {
@@ -162,7 +273,7 @@ export function createWorkspace(deps: WorkspaceDeps) {
       const tooLarge = error instanceof StudioError && error.code === "too_large";
       patchDoc(path, {
         status: tooLarge ? "blocked" : "error",
-        message: tooLarge ? `文件超过 ${MAX_EDIT_BYTES / 1024} KiB 的编辑上限。` : errorText(error),
+        message: tooLarge ? tooLargeMessage(undefined, cap) : errorText(error),
       });
       if (!tooLarge) fail(`无法打开 ${path}`, error);
     }
@@ -170,7 +281,9 @@ export function createWorkspace(deps: WorkspaceDeps) {
 
   function setText(path: string, text: string): void {
     const doc = docOf(path);
-    if (!doc || doc.status !== "ready" || doc.text === text) return;
+    if (!doc || doc.status !== "ready") return;
+    if (live.has(path)) dropLive(path, true); // the InputField took over: the buffer's text becomes the doc's
+    if (docOf(path)!.text === text) return;
     patchDoc(path, { text });
   }
 
@@ -192,13 +305,21 @@ export function createWorkspace(deps: WorkspaceDeps) {
       });
       if (!overwrite) return false;
     }
-    const text = docOf(path)?.text ?? doc.text;
+    const text = textOf(path) ?? doc.text;
+    const entry = live.get(path);
+    const version = entry?.editor.buffer.version;
     patchDoc(path, { saving: true });
     const mine = epoch;
     try {
       const result = await client.fs.writeText(project, path, text);
       if (mine !== epoch) return true;
       patchDoc(path, { saved: text, bytes: result.bytes, saving: false, conflict: undefined });
+      if (entry && live.get(path) === entry) {
+        // Edits made while the write was in flight keep the tab dirty (version moved on).
+        entry.savedVersion = version!;
+        entry.editor.history.breakCoalescing();
+        patchDoc(path, { text, bufferDirty: entry.editor.buffer.version !== version });
+      }
       store.update({ revision: result.revision, files: upsertFile(state().files, path, result.bytes) });
       toasts.success(`已保存 ${path}`);
       for (const listener of [...savedListeners]) listener(path);
@@ -223,6 +344,7 @@ export function createWorkspace(deps: WorkspaceDeps) {
     const docs = state().docs;
     const index = docs.findIndex((d) => d.path === path);
     if (index < 0) return;
+    dropLive(path);
     const next = docs.filter((d) => d.path !== path);
     const active = state().active === path ? next[Math.min(index, next.length - 1)]?.path : state().active;
     store.update({ docs: next, active });
@@ -264,10 +386,12 @@ export function createWorkspace(deps: WorkspaceDeps) {
     if (side === "theirs") {
       const theirs = doc.conflict.theirs;
       if (theirs === undefined) { dropDoc(path); return; } // deleted on disk: nothing to reload
-      patchDoc(path, { text: theirs, saved: theirs, bytes: theirs.length, conflict: undefined });
+      replaceContent(path, theirs, theirs.length);
     } else {
       // Keep mine: disk content is now the baseline, so the tab stays dirty and a save overwrites it.
       patchDoc(path, { saved: doc.conflict.theirs ?? "\u0000deleted", conflict: undefined });
+      const entry = live.get(path);
+      if (entry) { entry.savedVersion = -1; patchDoc(path, { bufferDirty: true }); }
     }
   }
 
@@ -332,6 +456,8 @@ export function createWorkspace(deps: WorkspaceDeps) {
     try {
       await client.fs.rename(project, path, target);
       const doc = docOf(path);
+      const entry = live.get(path);
+      if (entry) { live.delete(path); entry.path = target; live.set(target, entry); }
       if (doc) {
         store.update({
           docs: state().docs.map((d) => (d.path === path ? { ...d, path: target } : d)),
@@ -418,7 +544,7 @@ export function createWorkspace(deps: WorkspaceDeps) {
       const entry = state().files.find((f) => f.path === path);
       let disk: { text: string; bytes: number } | undefined;
       try {
-        disk = await client.fs.readText(project, path, MAX_EDIT_BYTES, entry?.bytes);
+        disk = await client.fs.readText(project, path, maxBytes(), entry?.bytes);
       } catch (error) {
         if (mine !== epoch) return;
         if (error instanceof StudioError && error.code === "not_found") {
@@ -435,8 +561,8 @@ export function createWorkspace(deps: WorkspaceDeps) {
       const now = docOf(path);
       if (!now || now.status !== "ready" || now.saving) return;
       if (disk.text === now.saved && !now.conflict) return; // our own write, or no net change
-      if (disk.text === now.text) { patchDoc(path, { saved: disk.text, bytes: disk.bytes, conflict: undefined }); return; }
-      if (now.text === now.saved) patchDoc(path, { text: disk.text, saved: disk.text, bytes: disk.bytes, conflict: undefined }); // clean: reload silently
+      if (disk.text === textOf(path)) { markBufferSaved(path, disk.text, disk.bytes); return; }
+      if (!isDirty(now)) replaceContent(path, disk.text, disk.bytes); // clean: reload silently
       else if (disk.text !== now.saved) patchDoc(path, { conflict: { kind: "changed", theirs: disk.text } });
     } finally {
       reconciling.delete(path);
@@ -468,13 +594,20 @@ export function createWorkspace(deps: WorkspaceDeps) {
     load, unload, refreshTree, toggleFolder, selectAsset,
     open, activate, setText, save, saveAll, close, confirmLeave, resolveConflict,
     createFile, createFolder, rename, remove,
-    reconcile, dirtyDocs, docOf,
+    reconcile, dirtyDocs, docOf, editorFor, releaseEditors, textOf,
     onSaved(listener: (path: string) => void): () => void { savedListeners.add(listener); return () => { savedListeners.delete(listener); }; },
     activeDoc: (): Doc | undefined => (state().active ? docOf(state().active!) : undefined),
     name: basename,
   };
 }
 export type Workspace = ReturnType<typeof createWorkspace>;
+
+function tooLargeMessage(bytes: number | undefined, cap: number): string {
+  const size = bytes === undefined ? "文件" : `文件为 ${Math.ceil(bytes / 1024)} KiB，`;
+  return cap >= MAX_CODE_BYTES
+    ? `${size}超过代码编辑器 ${cap / 1024 / 1024} MiB 的上限，无法在 Studio 中编辑。`
+    : `${size}超过多行输入框 ${cap / 1024} KiB 的上限。在“设置”中切换到“代码视图”编辑器可编辑最大 ${MAX_CODE_BYTES / 1024 / 1024} MiB 的文件。`;
+}
 
 function upsertFile(files: FileEntry[], path: string, bytes: number): FileEntry[] {
   return files.some((f) => f.path === path) ? files.map((f) => (f.path === path ? { ...f, bytes } : f)) : [...files, { path, bytes }];

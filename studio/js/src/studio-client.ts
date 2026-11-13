@@ -2,9 +2,17 @@
 // (studio/docs/ARCHITECTURE.md). Orchestration (chunk loops, hashing, stream
 // expansion) lives here in JS; the Dart provider only forwards.
 import { base64Decode, base64Encode, utf8Decode, utf8Encode } from "./bytes.ts";
-import { sha256Hex } from "./sha256.ts";
+import { Sha256 } from "./sha256.ts";
 
 export const CHUNK_BYTES = 128 * 1024;
+/**
+ * CPU work per guest turn. Every event dispatch runs under a 250 ms interrupt budget (an interrupted turn cannot be
+ * caught and silently drops the awaiting promise) and the pure-JS hash/encoder run at about 1 MB/s on the debug native
+ * build, so hashing, encoding and decoding walk large buffers in slices and call `yieldTurn` between them.
+ */
+export const SLICE_BYTES = 16 * 1024;
+/** Also yield once this much wall time was spent in the current turn (a loaded debug host runs several times slower). */
+export const TURN_SOFT_MS = 40;
 export const SMALL_WRITE_BYTES = 192 * 1024;
 export const DEFAULT_MAX_READ_BYTES = 4 * 1024 * 1024;
 /** `studio.fs.read` returns `too_large` above ~240 KiB; larger files go straight to chunked reads. */
@@ -53,7 +61,60 @@ export type WatchEvent =
 
 export interface Subscription { close(): void }
 
-export function createStudioClient(host: StudioHost, streams?: StudioStreams) {
+export interface StudioClientOptions {
+  /** Resolves in a LATER guest turn (the guest uses a frame timer); the default only defers a microtask (bun tests). */
+  yieldTurn?: () => Promise<void>;
+}
+
+export function createStudioClient(host: StudioHost, streams?: StudioStreams, options: StudioClientOptions = {}) {
+  const yieldTurn = options.yieldTurn ?? (() => Promise.resolve());
+  /** SHA-256 of `bytes`: at most SLICE_BYTES (and TURN_SOFT_MS of wall time) per turn. */
+  async function hashBytes(bytes: Uint8Array): Promise<string> {
+    const hasher = new Sha256();
+    const step = 4 * 1024;
+    let turnStart = Date.now(), inTurn = 0;
+    for (let offset = 0; offset < bytes.length; offset += step) {
+      const end = Math.min(offset + step, bytes.length);
+      hasher.update(bytes.subarray(offset, end));
+      inTurn += end - offset;
+      if (end < bytes.length && (inTurn >= SLICE_BYTES || Date.now() - turnStart >= TURN_SOFT_MS)) { await yieldTurn(); turnStart = Date.now(); inTurn = 0; }
+    }
+    return hasher.hex();
+  }
+  /** UTF-8 encodes `text` in windows (never splitting a surrogate pair), one window per turn. */
+  async function encodeText(text: string): Promise<Uint8Array> {
+    if (text.length <= SLICE_BYTES) return utf8Encode(text);
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (let start = 0; start < text.length;) {
+      let end = Math.min(start + SLICE_BYTES, text.length);
+      const last = text.charCodeAt(end - 1);
+      if (end < text.length && last >= 0xd800 && last <= 0xdbff) end += 1;
+      const part = utf8Encode(text.slice(start, end));
+      parts.push(part);
+      total += part.length;
+      start = end;
+      if (start < text.length) await yieldTurn();
+    }
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
+  }
+  /** UTF-8 decodes `bytes` in slices cut at character boundaries, one slice per turn. */
+  async function decodeText(bytes: Uint8Array): Promise<string> {
+    if (bytes.length <= SLICE_BYTES) return utf8Decode(bytes);
+    const parts: string[] = [];
+    for (let start = 0; start < bytes.length;) {
+      let end = Math.min(start + SLICE_BYTES, bytes.length);
+      while (end < bytes.length && end > start && (bytes[end]! & 0xc0) === 0x80) end -= 1; // do not cut inside a sequence
+      if (end === start) end = Math.min(start + SLICE_BYTES, bytes.length);
+      parts.push(utf8Decode(bytes.subarray(start, end)));
+      start = end;
+      if (start < bytes.length) await yieldTurn();
+    }
+    return parts.join("");
+  }
   async function call<T = any>(capability: string, params: Record<string, unknown> = {}): Promise<T> {
     try {
       return await host.request<T>(capability, params);
@@ -112,7 +173,7 @@ export function createStudioClient(host: StudioHost, streams?: StudioStreams) {
         first = next;
       }
       if (offset !== out.length) throw new StudioError("studio.fs.readChunk", "invalid_response", "short read");
-      const digest = sha256Hex(out);
+      const digest = await hashBytes(out);
       if (digest !== first.sha256) throw new StudioError("studio.fs.readChunk", "checksum_mismatch", "sha256 does not match the transferred bytes");
       return { bytes: out, sha256: digest };
     },
@@ -127,13 +188,14 @@ export function createStudioClient(host: StudioHost, streams?: StudioStreams) {
         }
       }
       const { bytes } = await fs.readBytes(project, path, maxBytes);
-      return { text: utf8Decode(bytes), bytes: bytes.length };
+      return { text: await decodeText(bytes), bytes: bytes.length };
     },
     /** Writes UTF-8 text: one call when small, otherwise a verified chunked upload that is aborted on failure. */
     async writeText(project: string, path: string, text: string): Promise<{ path: string; bytes: number; revision: number }> {
-      const bytes = utf8Encode(text);
+      const bytes = await encodeText(text);
       if (bytes.length <= SMALL_WRITE_BYTES) return fs.write(project, path, text);
-      const begin = await fs.upload.begin(project, path, bytes.length, sha256Hex(bytes));
+      const digest = await hashBytes(bytes);
+      const begin = await fs.upload.begin(project, path, bytes.length, digest);
       try {
         for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
           await fs.upload.chunk(project, begin.uploadId, offset, base64Encode(bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, bytes.length))));

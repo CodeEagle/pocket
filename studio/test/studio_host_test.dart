@@ -147,6 +147,17 @@ void main() {
       }
     }
 
+
+    // The Studio's default editor is the CodeView (M4); these M2 tests drive the multi-line InputField, so pick it in Settings.
+    Future<void> useInputFieldEditor() async {
+      await tap('设置');
+      await until(() => textOf().contains('多行输入框（备用）'), 'settings page');
+      await tap('多行输入框（备用）');
+      await pump(10);
+      await tap('源码');
+      await until(() => textOf().contains('+ 文件'), 'source page');
+    }
+
     try {
       // 1. The project list comes from studio.project.list on the real service.
       await until(() => textOf().contains('PocketJS Flutter host showcase'), 'project list');
@@ -178,6 +189,7 @@ void main() {
 
       // 4. Tapping a file shows its real text in the read-only viewer.
       // A small file: the multi-line InputField shapes the whole text, which is slow on the debug native build.
+      await useInputFieldEditor();
       await pump(10); // let layout settle after the expand before the next tap
       await tap('manifest.json');
       final firstLine = File('$projectRoot/manifest.json').readAsLinesSync().firstWhere((l) => l.trim().length > 8).trim();

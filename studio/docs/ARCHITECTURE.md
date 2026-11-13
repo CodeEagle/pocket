@@ -57,18 +57,19 @@ All calls are `request` capabilities except the two `stream` rows. Every call ne
 | `studio.preview.deployStatus` | `{project, job}` | job | `GET …/deploy/:job` | read |
 | `studio.preview.deployCancel` | `{project, job}` | job | `DELETE …/deploy/:job` | deploy |
 | `studio.publish.plan` | `{project, channel?: "test"\|"release"}` | target summary | `GET …/publish-targets?channel=` | read |
-| `studio.publish.publish` | `{project, channel?}` | publish result | `POST …/publish` | publish |
+| `studio.publish.publish` | `{project, channel?}` | `{status:{publish:{keyId,runtimeAbi,payloadSha256,version,build,channel,…}}, manifest:{keyId,signature,payloadBase64Bytes}, manifestUrl, hostConfigUrl, appConfigUrl, updateUrl, archiveUrl, packages, reusedPackages}`. The signed envelope's base64 `payload` body is dropped by the provider (it can exceed the 256 KiB result quota for large projects and would fail an already completed publish); the signed bytes are served at `manifestUrl` | `POST …/publish` | publish |
 | `studio.publish.history` | `{project}` | version backend snapshot | `GET …/versions` | read |
 | `studio.publish.offline` | `{project}` | `{archiveUrl, filename}` | `POST …/package-offline` | publish |
 | `studio.artifacts.list` | `{project}` | `{revision, builtRevision, artifacts}` | `GET …/status` (projection) | read |
-| `studio.artifacts.inspect` | `{project, name}` (one of the 8 fixed artifact names) | `{name, bytes, encoding:"utf8", data, truncated}` for `app.js` and `*.json`; `{name, bytes, encoding:"binary"}` (no data) for `.qjbc`/`.pak` | `GET …/artifacts/<name>` | read |
+| `studio.artifacts.inspect` | `{project, name}` (one of the 9 fixed artifact names: the 8 build outputs plus `resources.json`, the read-only resource snapshot added in M5) | `{name, bytes, encoding:"utf8", data, truncated}` for `app.js` and `*.json` (limit 128 KiB of text; an oversized pretty-printed JSON is re-encoded compactly first so `resources.json` stays parseable; `bytes` is always the real artifact size); `{name, bytes, encoding:"binary"}` (no data) for `.qjbc`/`.pak` | `GET …/artifacts/<name>` | read |
 | `studio.service.health` | `{}` | `{ok, service, version, projectId?, updatePackageVersion?, bluetooth?}` | `GET /health` (scrubbed) | read |
 | `studio.service.upgrade.status` | `{}` | upgrade status | `GET /api/studio/upgrade` | read |
 
 Clipboard is not a studio capability: the guest uses the SDK `clipboard.*` plugin (`@pocket/ui/clipboard`).
 Reloading the preview child is a guest-side `system.runtime.destroy` + `system.runtime.create` (see
 `sdk/docs/STUDIO_SIGNED_PREVIEW.md`); `studio.preview.publish` only produces the signed package. Reserved, not
-registered in M1: `studio.service.upgrade.check/apply` (M6), `studio.project.resources.*` (M5),
+registered in M1: `studio.service.upgrade.check/apply` (M6), `studio.project.resources.*` (resource placement editing; the M5
+pack-contents summary is read from the `resources.json` artifact instead),
 `studio.logs.diagnostics` (M7).
 
 ### Permissions
@@ -126,6 +127,12 @@ Applied to every response, error message, and stream event (`StudioPathScrubber`
 4. The CSRF token value is replaced by `<redacted>` wherever it occurs; it is never returned by any call.
 5. Artifacts: text artifacts are scrubbed; binary artifacts (`.qjbc`, `.pak`) are returned as metadata only
    because their embedded debug paths cannot be scrubbed.
+6. Signing material (M5): keys stay in the service workspace (`keys/editor-dev-key.json`, never served by any route). As a
+   provider-side backstop, JSON keys named `privateKey`, `private_key`, `privateKeyPem`, `privateKeyBase64`, `secretKey`,
+   `signingKey`, `signingSeed`, `seed` are dropped at any depth and PEM/OpenSSH private-key blocks inside any string become
+   `<redacted-key>`. Public keys (`publicKey`, `keyId`) are not secrets and pass. Tests: `studio_plugin_test.dart` (every
+   publish route, errors and artifacts) and `real_service_test.dart` (real publish; no field of the real key file appears in
+   any result).
 
 Project-relative paths (`src/tmp/x.ts`) and loopback URLs are unaffected. Rule 3 is a safety net with a fixed
 list of system top-level directories; it is not a general path parser. Tests: `sdk/packages/pocket_studio/test`.
@@ -165,15 +172,17 @@ src/state/                   plain TypeScript stores (no Solid import, unit-test
   build.ts ring.ts           build control, build.events, 2,000-line ring buffer, diagnostics
   preview.ts system-link.ts  build -> publish -> destroy/create -> first frame; the only System capability user
   deploy.ts settings.ts      devices/deploy jobs; Studio-local settings via system.storage
+  publish.ts artifacts.ts    M5: signed publish (plan/confirm/publish/offline); artifact inspector
+  versions.ts copy.ts        M5: version journal view; copy-to-clipboard through the clipboard capability client
   projects.ts toasts.ts dialogs.ts resilient.ts studio.ts (composition root, auto-build wiring)
-src/pages/                   projects source console preview resources settings + placeholder (artifacts, publish, versions)
+src/pages/                   projects source console preview resources settings artifacts publish versions
 src/components/              rail, file-tree, tabs, editor-pane (swappable), preview-surface, toasts, dialog-host
 src/ui/bind.ts               Store -> Solid accessor; the only bridge between stores and the renderer
 ```
 
-Adding a page (M5) is one line in `src/pages/index.tsx` plus a store; `app.tsx` does not change. The editor is
+Adding a page is one line in `src/pages/index.tsx` plus a store; `app.tsx` and the rail (which renders the `pages` registry) do not change. The editor is
 an `EditorPane` (`{path, text, onChange, onSave, diagnostics, jump}`) selected by the `editor` setting; M2 registers
-the multi-line `InputField`, M4 registers `code` (CodeView) in `editorPanes` without touching the Source page.
+the multi-line `InputField`, M4 registers `code` (CodeView) in `editorPanes` without touching the Source page (see "Code editor pane (M4)").
 
 Rules the stores follow: JS owns reconnection (`resilient.ts`: backoff 0.5 s to 15 s, a resync callback on the
 first event after a drop; `gap` events and quota errors take the same path), per-project epochs drop late results
@@ -194,10 +203,50 @@ after a project switch, and every service error becomes a toast (`code: message`
   available**: the chunk route refuses `assets/` and the SDK has no PNG/JPEG decoder for guest-side bytes
   (`@pocket/ui/images` shows host-captured thumbnails only), so the page says "预览不可用". New asset upload needs a
   file-dialog capability (not in scope); text files are created or replaced from the Source page.
-* Save: toolbar button. Cmd/Ctrl+S is registered through `onTextEvent`; a focused `InputField` is a Flutter text
-  field that keeps its keys, so reliability needs the M4 raw-text CodeView.
+* Save: toolbar button. A focused `InputField` is a Flutter text field that keeps its keys, so Cmd/Ctrl+S is reliable
+  only in the code editor (below).
 * The guest now routes `textInput.*` host events to `deliverTextInputEvent` (the M1 shell never did, so its create
   dialog could not be typed in).
+
+### Code editor pane (M4)
+
+Setting `editor`: `"code"` (default) or `"input"` (the M2 InputField fallback). A stored `studio.settings.v1` without
+`editor` migrates to `code`; an explicit `input` is kept. Source: `sdk/docs/CODE_VIEW.md` / `CODE_EDITOR_CORE.md`
+(`CodeView` + `CodeEditor` from `@pocket/ui`), reused unchanged except the lazy tokenizer below.
+
+* Files: `src/components/editor-pane.tsx` (`CodeViewEditor`, keyed by path so a tab switch builds a view over that tab's
+  buffer), `src/state/workspace.ts` (buffers), `src/pages/source.tsx` (layout), `src/ui/guest-env.ts` (`yieldTurn`).
+* Buffer ownership: the workspace keeps one `CodeEditor` per open document (`editorFor`), alive across tab switches
+  (undo history and selection survive) and dropped with the doc. The buffer is the live text; `Doc.text` is only a
+  snapshot (open, save, reload, hand-over). Dirty = `buffer.version !== savedVersion`; the store is patched only when
+  that flag flips, so a keystroke does not re-render tabs or header. Consequence: undoing back to the saved text still
+  shows "modified" (versions only grow). Save writes `buffer.toString()` (CRLF files stay CRLF; mixed EOL is
+  normalized to the dominant one) and edits made while a write is in flight keep the tab dirty.
+* Settings switch: choosing `input` calls `releaseEditors()` (each buffer's text becomes `Doc.text`, still dirty);
+  choosing `code` builds new buffers from `Doc.text`, so undo history does not survive a pane switch.
+* External change (fs.watch): a clean tab is reloaded as ONE undoable edit over the changed middle (common prefix and
+  suffix are found with native `startsWith`/`endsWith`), selection kept when outside the edit, then marked saved. So
+  Cmd+Z reverts the reload (the tab then shows modified against the new disk text) and Cmd+Shift+Z re-applies it.
+  A dirty tab keeps its buffer and shows the conflict banner; "load disk version" is the same undoable replacement,
+  "keep mine" makes the disk text the baseline and the tab stays dirty. `Doc.reload` tells the pane to repaint.
+* Diagnostics: build `{file,line,column}` (1-based) -> CodeView gutter dot, line tint and tip (0-based). A Console jump
+  `{line, column, seq}` sets the caret, scrolls with 5 lines of context, repaints and opens the raw session (focus).
+* Input: Cmd+S is the CodeView `save` intent -> `workspace.save`; Cmd+C/X/V use `clipboard.*` through the client passed
+  in `createStudio({clipboard})` (manifest already declares the capabilities and `clipboard.read/write`, which the host
+  grants to `dev.pocket.studio`); find/replace is the CodeView bar. `fontSlot={inlineFontSlot("body")}` is passed.
+* Size: InputField 1 MiB, code editor 4 MiB with a clear message above it. Large files use the chunked read
+  (>240 KiB) and verified upload (>192 KiB).
+* Guest turn budget (found on the real host and probe): every guest turn runs under a 250 ms interrupt budget; an
+  interrupted turn throws an uncatchable error and silently drops the awaiting promise. The pure-JS base64, SHA-256
+  and UTF-8 helpers run at about 1 MB/s on the debug build, so `studio-client` hashes, encodes and decodes in slices
+  (16 KiB or 40 ms per turn, `Sha256` is incremental, `base64Decode` is table driven) and awaits `yieldTurn` (a frame
+  timer) between slices; `TokenCache` tokenizes with a 60 ms budget per turn and CodeView repaints as it catches up
+  (rows past the tokenized prefix are uncoloured meanwhile). Probe tests cover opening and saving a >240 KiB file.
+* Native text cache: CODE_VIEW.md measured `textLayoutCacheCapacity: 256` thrashing and 2,048 fine. `PocketAppConfig`
+  cannot carry it yet (only `PocketView` has the parameter), so `studio/lib/main.dart` could not set it; the Linux test
+  reports capacity 256. Needs an `sdk/lib` change (see M0_REPORT section 10).
+* Deferred to macOS: the IME checklist (candidate window, marked text, clause selection, dead keys), key forwarding
+  for Cmd+C/V/F/S on a real keyboard, and the profile-build frame budget. Not claimed as passed.
 
 ### Build, console, logs (M3)
 
@@ -235,6 +284,50 @@ The host (`studio/lib/main.dart`) starts the service, then reads only the public
 any package exists is built by `previewBootstrap` from the Studio's own runtime ABI with a build floor of 1 (previews
 are always build >= 2); the signed package carries the real manifest and bytecode. No Dart state machine was added.
 
+### Publish and inspect (M5)
+
+Three rail pages replace the M1 placeholders. All policy is in JS stores; the provider forwards.
+
+* **发布 Publish** (`state/publish.ts`, `pages/publish.tsx`). The page loads `studio.publish.plan` for the chosen channel
+  (测试频道 / 稳定版频道): the root target (version, build, built/busy, the channel's current published version, the slot
+  owner = this project) and the reused packages with their slot owners (`ownerProjectId`). The publish gate runs in the
+  guest and reads the service's current truth: unsaved source edits refuse (publishing signs the saved build only), then
+  `build.refresh()` must show `builtRevision === revision`, no error, not busy; otherwise a message and a "先构建" button, and
+  **no request is sent**. A release (稳定版) publish additionally asks in a modal first ("发布稳定版？", cancel publishes
+  nothing); a test publish does not. While `studio.publish.publish` is in flight the page shows the step and the last log
+  lines of the service (they arrive on the already open `build.events` stream, because the service logs publish steps).
+  The result shows the public facts: version, build, source revision, time, key id, runtime ABI, payload sha256, manifest
+  (`latest.json`), `host.json`, App entry and archive URLs, published and reused packages, each with a 复制 button. A failure
+  (409 slot owned by another project, build gate, ...) is shown as the error and a toast, never as a success; a
+  `service_timeout` additionally says to check the version page (the service may have finished) and refreshes it. After a
+  page reload the last publish is read back from `studio.build.status` (`publish`). **Keys never reach the guest**: the
+  service signs with `keys/editor-dev-key.json`; no route returns it, and the provider's scrubber drops key-like fields and
+  PEM blocks as a backstop (rule 6 above). The offline package (`studio.publish.offline`) shows the archive file and its
+  absolute URL (service origin + `/releases/...`); it never changes a channel.
+* **产物 Artifacts** (`state/artifacts.ts`, `pages/artifacts.tsx`). `studio.artifacts.list` says whether a build exists; each
+  announced file is inspected once (binaries: size only; JSON: parsed). Overview tabs: bytecode (`runtimeAbi`,
+  `bindingGeneration`, `entryFormat`, `tickHz`, payload/source sha256, engine ABI, sizes), 来宾清单 (required/optional
+  capabilities, permissions, `memory.heapLimitBytes/maxPakBytes`), 包内容 and 构建信息 (`build.json`: generation, revision,
+  packages). Pack contents are summarised **from the build's resource snapshot (`resources.json`)**: per package the count and
+  bytes of resources in the pak vs. network and the asset count. The `.pak`/`.qjbc` themselves are metadata only (embedded
+  debug paths cannot be scrubbed); a snapshot above 128 KiB of text or a missing snapshot is reported as such. Selecting a
+  file shows its raw text (first 400 lines; `app.js` is fetched only on demand). Hashes have 复制 buttons that copy the
+  whole value through the clipboard capability client (`studio.copy`); a missing or denied clipboard is reported, not faked.
+* **版本 Versions** (`state/versions.ts`, `pages/versions.tsx`). A read-only view of `studio.publish.history`: backend origin,
+  host version, compatibility branch, LAN flag, the fixed App entry URL, the `test` and `stable` slots (version/build,
+  packages, reused packages, archive URL) and every published release (version, build, revision, time, key identity data,
+  payload digest, per-package manifest/host.json URLs, archive URL). Archive downloads are shown as URLs (no file dialog).
+  **Trial / promoted / rolled-back is not shown because the service does not know it**: it records publications and slot
+  pointers; trial, promotion and rollback are decided on each device by its update coordinator
+  (`sdk/docs/RELEASE_TRUST_POLICY.md`). The page says so in place instead of inventing a status.
+
+Composition (`state/studio.ts`): `publish.onPublished` refreshes the version list; a finished build refreshes the publish plan
+and (if loaded) the artifact list; a project switch resets all three stores (per-project epochs drop late results).
+
+Service/provider changes made for M5 (everything else was already present): `resources.json` joined the artifact allow-list
+(`readArtifact` in `sdk/editor/server.ts`, test in `editor_server.test.ts`); provider: artifact name, compact re-encode of
+oversized JSON, publish-result envelope slimming, key scrubbing (`studio_plugin_test.dart`, `real_service_test.dart`).
+
 ## Studio-local settings
 
 `studio.settings.v1 = {autoBuild, debounceMs, dockPreview, editor}` in the Studio's SystemUI storage. `studio.project.settings.*`
@@ -271,6 +364,10 @@ configuration on the real native library.
 * `studio/test/studio_host_test.dart`: M1 exit test (real native library, real service on the demo JS project).
 * `studio/test/studio_edit_test.dart`: M2 exit test (temp copy of the Showcase project, edit + Save on disk).
 * `studio/test/studio_preview_loop_test.dart`: M3 exit test (auto-build, signed preview child reloads, latency).
+* `studio/test/studio_code_editor_test.dart`: M4 exit test, Linux half (5,000-line TSX through the real host: wheel scroll, IME deltas, hardware keys, Meta+Z, Meta+S, file on disk; prints layout-cache stats).
+* `studio/js/tests/studio_guest_code.test.ts`: code pane on the probe (typing, save write/upload, >240 KiB open, diagnostic jump, reload, settings switch, clipboard, find). The M2/M3 tests select the InputField explicitly.
+* `studio/js/tests/state_m5.test.ts`, `studio_guest_publish.test.ts` (fake service on the real probe): publish/artifacts/versions stores and the three pages by taps.
+* `studio/test/studio_publish_test.dart`: M5 exit test (Linux part): real service + real signing; the Studio guest publishes a signed test update by taps; a client (`PocketHostConfig.load` -> `PocketSession` -> `FfiPocketRuntime`) downloads, verifies, activates and runs it; a second publish is picked up by the same client session; no key material or absolute path reached the guest.
 
 Known gaps found while testing: (1) in the probe harness a second large (>~170 KB) inbound `host.response` right after
 another is not delivered to the guest, so chunked reads are verified by bun unit tests and the verified client, not by

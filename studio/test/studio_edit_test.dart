@@ -140,11 +140,23 @@ void main() {
       }
     }
 
+
+    // The Studio's default editor is the CodeView (M4); these M2 tests drive the multi-line InputField, so pick it in Settings.
+    Future<void> useInputFieldEditor() async {
+      await tap('设置');
+      await until(() => textOf().contains('多行输入框（备用）'), 'settings page');
+      await tap('多行输入框（备用）');
+      await pump(10);
+      await tap('源码');
+      await until(() => textOf().contains('+ 文件'), 'source page');
+    }
+
     try {
       await until(() => textOf().contains('PocketJS Flutter host showcase'), 'project list');
       await tap('PocketJS Flutter host showcase');
       await until(() => textOf().contains('release.ts'), 'file tree');
       final original = File('$copy/release.ts').readAsStringSync();
+      await useInputFieldEditor();
       await tap('release.ts');
       await until(() => textOf().contains('demoRelease'), 'file opened in the editor');
       expect(textOf(), contains('release.ts ·'), reason: 'tab/header names the file');

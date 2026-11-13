@@ -84,6 +84,9 @@ export class ProbeSession {
       if (parsed.frame) {
         void this.answer(parsed.frame as Frame);
         this.frameWaiters.shift()?.ok(parsed.frame);
+      } else if (parsed.ok === false && this.frameWaiters.length > 0 && this.lineWaiters.length === 0) {
+        // A guest turn over the 250 ms budget (or any frame failure) answers {"ok":false,"error":...}: reject the pending frame.
+        this.frameWaiters.shift()!.fail(new Error(`pocket_probe frame failed: ${parsed.error}`));
       } else this.lineWaiters.shift()?.ok(parsed);
     }
   }

@@ -79,7 +79,7 @@ Auth column: `R` = read guards only; `W` = read guards + write credential.
 | POST | `/api/projects/:id/build` (alias `/compile`) | W | `{}` → 202 + status; queued `buildGuest` | `studio.build.start` | [~] |
 | GET | `/api/projects/:id/status` | R | `EditorStatus` (revision, builtRevision, busy, error, last 200 logs, artifacts, publish) | `studio.build.status` | [~] |
 | GET | `/api/projects/:id/logs` | R | `{logs: string[≤200], error}`; lines ≤4096 chars | `studio.logs.tail` | [~] |
-| GET | `/api/projects/:id/artifacts/<name>` | R | one of `app.js app.qjbc app.bytecode.json app.pak guest-manifest.json build.json app.worker.qjbc app.worker.bytecode.json` | `studio.artifacts.inspect` | [~] |
+| GET | `/api/projects/:id/artifacts/<name>` | R | one of `app.js app.qjbc app.bytecode.json app.pak guest-manifest.json build.json resources.json app.worker.qjbc app.worker.bytecode.json` (`resources.json` allowed in M5) | `studio.artifacts.inspect` | [x] (产物 page) |
 | GET/POST | `/api/projects/:id/diagnostics` | R/W | diagnostics export / record | `studio.logs.diagnostics` | [ ] |
 
 **Added on the service:** `POST build/cancel` (aborts the compiler process group; final state
@@ -110,12 +110,12 @@ the JSX-lowered intermediate module.
 
 | Method | Path | Auth | Payload / response | Studio capability | Parity |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/projects/:id/publish-targets?channel=test|release` | R | target summary, reusable packages | `studio.publish.plan` | [~] |
-| POST | `/api/projects/:id/publish` (alias `/package`) | W | `{channel?: test|release}` → manifest, URLs, packages | `studio.publish.publish` | [~] |
-| POST | `/api/projects/:id/package-offline` | W | offline archive URL | `studio.publish.offline` | [~] |
-| GET | `/api/projects/:id/versions` | R | version backend snapshot (slots, history) | `studio.publish.history` | [~] |
+| GET | `/api/projects/:id/publish-targets?channel=test|release` | R | target summary, reusable packages | `studio.publish.plan` | [x] (M5 page) |
+| POST | `/api/projects/:id/publish` (alias `/package`) | W | `{channel?: test|release}` → manifest, URLs, packages | `studio.publish.publish` | [x] (M5 page) |
+| POST | `/api/projects/:id/package-offline` | W | offline archive URL | `studio.publish.offline` | [x] (M5 page) |
+| GET | `/api/projects/:id/versions` | R | version backend snapshot (slots, history) | `studio.publish.history` | [x] (M5 page) |
 | GET/HEAD | `/updates/…`, `/pocket/…`, `/test/pocket/…`, `/stable/pocket/…` | R | signed manifests and blobs for clients | not a guest capability (served to devices) | n/a |
-| GET | `/releases/:id[/<release>].tar.gz` | R | release archives | `studio.publish.history` (download link) | [~] |
+| GET | `/releases/:id[/<release>].tar.gz` | R | release archives | `studio.publish.history` (download link) | [x] shown as a URL |
 
 ### 2.6 Visual novel editor (`sdk/editor/novel.ts`)
 
@@ -139,21 +139,21 @@ plus stage/localization/authoring/backups modules).
 | --- | --- | --- | --- | --- |
 | Shell | Project switcher, project title/subtitle/state | `project-switcher`, `projects`, `project-title`, `project-state` | M1 | [x] (list + open + 暂无项目 state; subtitle/state chips later) |
 | Shell | New project dialog with App/Game template | `new-project`, `create-dialog`, `create-form` | M1 | [x] (App/Game, id, name, appId; version/tickHz fields later) |
-| Shell | Left rail: stage, source, console, resources, settings, versions | `rail-*` | M1 | [x] (项目/源码/控制台/预览/资源/设置 are real pages; 产物/发布/版本 are M5 placeholders) |
+| Shell | Left rail: stage, source, console, resources, settings, versions | `rail-*` | M1 | [x] (项目/源码/控制台/预览/资源/设置 and, since M5, 产物/发布/版本 are real pages) |
 | Shell | Notice toast | `notice*` | M1 / M2 | [x] (bottom-right toast stack, tone, auto-dismiss, tap to dismiss) |
 | Shell | Studio self-upgrade bar | `studio-upgrade-*` | M6 | [ ] |
-| Source | File picker, source editor, save, reload, bytes/revision, split toggle, close | `file-picker`, `source`, `save`, `refresh-source`, `source-*` | M2 / M4 | [x] M2: tree, tabs with dirty state, multi-line InputField, Save button, unsaved prompts, create/rename/delete/mkdir/rmdir, fs.watch reconcile, chunked IO, 1 MiB cap. [~] Cmd/Ctrl+S is wired through `onTextEvent` but a focused InputField keeps its keys (reliable only with the M4 raw CodeView); folder rename unsupported (service moves files only); large-file editing is M4 |
+| Source | File picker, source editor, save, reload, bytes/revision, split toggle, close | `file-picker`, `source`, `save`, `refresh-source`, `source-*` | M2 / M4 | [x] M2: tree, tabs with dirty state, multi-line InputField, Save button, unsaved prompts, create/rename/delete/mkdir/rmdir, fs.watch reconcile, chunked IO, 1 MiB cap for the InputField. [x] M4: `CodeView` (default `editor: "code"`; the InputField stays as the `input` fallback): syntax colours, gutter diagnostics, find/replace, undo, system clipboard, Cmd+S/Cmd+Z through the raw key session, dirty from the buffer version, files up to 4 MiB through the sliced chunked read/upload. Linux proof: `studio/test/studio_code_editor_test.dart` (5,000-line file); macOS IME and profile frame budget are deferred. [~] folder rename unsupported (service moves files only) |
 | Preview | Viewport picker, phone bezel toggle, regions overlay, resize height | `viewport-picker`, `preview-bezel-toggle`, `toggle-regions`, `resize-preview-height` | M3 | [ ] |
 | Preview | Refresh, capture screenshot, copy preview link | `refresh-preview`, `capture-preview`, `copy-preview-link` | M3 (link is web-only) | [~] refresh = "构建并刷新预览"/"重新加载"; screenshot and link not built |
 | Preview | Child app surfaces | `preview-surfaces` | M3 | [x] signed child composited by `CompositorSurface` (Source dock and Preview page); phases building/publishing/loading/running/error are real facts. Linux proof with the real library + service: `studio/test/studio_preview_loop_test.dart`; on-screen behavior on macOS not verified |
 | Preview | Local Bluetooth (Noble) toggle | `web-bluetooth-toggle`, `bluetooth-provider` | — (ask owner) | — |
-| Console | Build tab: build button, state, log, clear | `build`, `build-state`, `log`, `clear-log` | M3 | [x] start/cancel, status, build.events stream with JS reconnect, 2,000-line ring buffer with gap markers, clickable diagnostics (open file at line; the InputField shows the line context, CodeView scrolls in M4) |
+| Console | Build tab: build button, state, log, clear | `build`, `build-state`, `log`, `clear-log` | M3 | [x] start/cancel, status, build.events stream with JS reconnect, 2,000-line ring buffer with gap markers, clickable diagnostics (open file at line:column; CodeView scrolls and puts the caret there, the InputField shows the line context) |
 | Console | Deploy tab: device picker, deploy, cancel, log | `device-picker`, `deploy`, `deploy-cancel`, `deploy-log` | M3 | [x] on the Preview page (device list, deploy builds first, polling, log, stop). Not exercised against a real device/simulator here |
-| Console | Signing tab: publish test, target picker, channel, reused packages | `publish-test`, `publish-target-*` | M5 | [ ] |
-| Console | Artifacts tab: artifact list, runtime ABI | `artifacts`, `runtime-abi` | M5 | [ ] |
+| Console | Signing tab: publish test, target picker, channel, reused packages | `publish-test`, `publish-target-*` | M5 | [x] 发布 page: test/release channel, plan (root target, reused packages and their slot owners), gated signed publish with progress, release confirmation, result facts (key id, ABI, payload sha256, manifest/host.json/App/archive URLs), offline package, copy buttons. Target *picker* for another project's mini app is not built (a reused package is shown with its owner; publishing it needs opening the owner project, as in the web Studio) |
+| Console | Artifacts tab: artifact list, runtime ABI | `artifacts`, `runtime-abi` | M5 | [x] 产物 page: file list with sizes, bytecode metadata, guest manifest (capabilities, permissions, memory), pack contents summary (from `resources.json`), build.json, raw text view, copyable hashes. Downloads are not offered (no file dialog): binaries are metadata only |
 | Inspector | Resources: package picker, placement list, save | `resource-*`, `save-resources` | M5 | [ ] (the "资源" page is the M2 asset browser: list + metadata; image preview unavailable, see ARCHITECTURE) |
 | Inspector | Settings: name, title, appId, version, build, tickHz | `config-*` | M1 | [ ] (`studio.project.settings.*` transport done, UI pending) |
-| Inspector | Versions: backend origin, slots, history, host guide, app config | `version-*` | M5 | [ ] |
+| Inspector | Versions: backend origin, slots, history, host guide, app config | `version-*` | M5 | [x] 版本 page: origin, host/compat version, LAN flag, App entry URL, test/stable slots, release history with details and archive URLs. Trial/promoted/rolled-back is device state the service does not record, so it is explained, not shown. The web "host guide" prose and per-row one-click archive download are not reproduced |
 | Tools | Export diagnostics | `export-diagnostics` | M7 | [ ] |
 | Tools | Open visual novel editor | `novel-open` | — (ask owner) | — |
 | Tools | WeChat preview pane | `wechat-*` | — (ask owner) | — |
@@ -202,3 +202,22 @@ Exit tests (real native library, real editor service, both on temp copies, never
 Open: asset image preview (no byte capability for `assets/`, no PNG/JPEG decoder in the SDK), asset upload (needs a
 file-dialog capability), folder rename, screenshot/copy-link, Cmd/Ctrl+S inside a focused InputField, macOS
 verification of compositing, focus and health promotion of the preview child.
+
+## 7. M5 status (publish and inspect)
+
+Pages 发布, 产物, 版本 (stores `publish.ts`, `artifacts.ts`, `versions.ts`; `ARCHITECTURE.md` "Publish and inspect (M5)").
+
+Exit test (Linux part), `studio/test/studio_publish_test.dart`, real native library + real editor service + real signing, on a
+TEMP project: the Studio guest builds (Console), publishes a signed **test** update (发布测试包) by pointer taps; the
+Studio shows the version, key id, payload digest and the copy button puts the key id on the clipboard; the 版本 page lists the
+entry; a client (`PocketHostConfig.load` on the service's test slot -> `PocketSession.initialize` -> `FfiPocketRuntime`)
+downloads, verifies and activates that package, its guest output (`PUBLISHED_V1 count 0`) is drawn and an input tap changes
+the frame (`count 1`); a second publish (source changed through the service, rebuilt and published by taps) shows two
+entries and the same client session activates build N+1 and draws `PUBLISHED_V2`. No byte of the service's key file and no
+absolute workspace path appears in anything the host sent to the guest.
+
+Not done / open: the macOS app itself (Linux container); stable-channel publish is covered by guest tests with the fake
+service (confirmation, slot) but the real-service exit test publishes only `test`; the web Studio's publish-target picker for
+mini apps owned by other projects; one-click archive download; a Resources inspector with placement editing
+(`studio.project.resources.*`, still reserved); the 128 KiB inspect limit means a resource snapshot above it is not summarised.
+

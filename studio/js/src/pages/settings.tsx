@@ -24,7 +24,7 @@ export function SettingsPage(props: { studio: Studio }) {
       <MobileSwitch label="在“源码”页右侧显示实时预览" value={settings().dockPreview} onChange={(v: boolean) => void s.settings.set({ dockPreview: v })} />
       <Text class="text-xs" style={{ textColor: C.muted }}>编辑器</Text>
       <MobileSegmentedControl
-        items={[{ id: "input", label: "多行输入框" }, { id: "code", label: "代码视图（即将推出）" }]}
+        items={[{ id: "input", label: "多行输入框（备用）" }, { id: "code", label: "代码视图（默认）" }]}
         active={settings().editor}
         onChange={(id) => void s.settings.set({ editor: id === "code" ? "code" : "input" })}
       />

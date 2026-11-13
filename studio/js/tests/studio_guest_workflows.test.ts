@@ -176,10 +176,24 @@ test("files above the editor cap are not opened and no bytes are requested", asy
   try {
     let frame = await openAlpha(session);
     await tapText(session, frame, "huge.ts");
-    frame = await session.until((f) => has(f, "超过当前 InputField 编辑器"), "cap message");
+    frame = await session.until((f) => has(f, "超过多行输入框"), "cap message");
     assert.ok(has(frame, "2048 KiB"));
     assert.equal(fake.calls("studio.fs.read").length + fake.calls("studio.fs.readChunk").length, 0, "no bytes are requested for a capped file");
     assert.equal(has(frame, "huge.ts ●"), false);
+  } finally { session.kill(); }
+}, 60_000);
+
+test("code editor lifts the InputField cap up to 4 MiB: a 5 MiB file is refused with a clear message and no bytes are requested", async () => {
+  const { fake, session } = await boot((f) => {
+    f.files.set("huge.ts", "x");
+    f.reportedBytes.set("huge.ts", 5 * 1024 * 1024);
+  }, "code");
+  try {
+    let frame = await openAlpha(session);
+    await tapText(session, frame, "huge.ts");
+    frame = await session.until((f) => has(f, "超过代码编辑器 4 MiB"), "cap message");
+    assert.ok(has(frame, "5120 KiB"));
+    assert.equal(fake.calls("studio.fs.read").length + fake.calls("studio.fs.readChunk").length, 0);
   } finally { session.kill(); }
 }, 60_000);
 

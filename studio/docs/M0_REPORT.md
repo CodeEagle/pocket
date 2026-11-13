@@ -243,3 +243,10 @@ Still open for Spike A: the macOS IME checklist in `sdk/docs/STUDIO_TEXT_INPUT.m
 Known residual weakness (unchanged, documented): the constant `x-pocket-editor: 1` header passes
 the write credential check; `status.error`/`logs` can carry absolute paths and must be scrubbed by
 the Studio host provider.
+
+### M4 (Studio code editor) deferred checks
+
+Linux proof: `studio/test/studio_code_editor_test.dart`. Deferred to macOS, NOT passed: the IME checklist (candidate
+window position, marked-text underline, Japanese clause selection, dead keys), Cmd+C/V/F/S forwarding from a real
+keyboard, and the profile-build frame budget while scrolling and typing a 5,000-line file. Open SDK change:
+`PocketAppConfig` has no `textLayoutCacheCapacity` (2,048 recommended), so `studio/lib/main.dart` still uses 256.

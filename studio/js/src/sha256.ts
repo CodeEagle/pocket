@@ -10,18 +10,55 @@ const K = Uint32Array.from([
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
-export function sha256Hex(data: Uint8Array): string {
-  const h = Uint32Array.from([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
-  const bitLength = data.length * 8;
-  const padded = new Uint8Array(((data.length + 9 + 63) >> 6) << 6);
-  padded.set(data);
-  padded[data.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, Math.floor(bitLength / 0x100000000));
-  view.setUint32(padded.length - 4, bitLength >>> 0);
-  const w = new Uint32Array(64);
-  for (let offset = 0; offset < padded.length; offset += 64) {
-    for (let i = 0; i < 16; i += 1) w[i] = view.getUint32(offset + i * 4);
+/**
+ * Incremental SHA-256. The guest runs every event dispatch under a 250 ms interrupt budget (an interrupted turn is
+ * uncatchable and silently drops the awaiting promise), and this pure-JS hash runs at roughly 1 MB/s on the debug
+ * native build, so large buffers are fed in slices across turns (see `studio-client.ts`).
+ */
+export class Sha256 {
+  private readonly h = Uint32Array.from([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+  private readonly w = new Uint32Array(64);
+  private readonly block = new Uint8Array(64);
+  private filled = 0;
+  private total = 0;
+
+  update(data: Uint8Array): this {
+    this.total += data.length;
+    let offset = 0;
+    if (this.filled > 0) {
+      const take = Math.min(64 - this.filled, data.length);
+      this.block.set(data.subarray(0, take), this.filled);
+      this.filled += take;
+      offset = take;
+      if (this.filled < 64) return this;
+      this.compress(this.block, 0);
+      this.filled = 0;
+    }
+    for (; offset + 64 <= data.length; offset += 64) this.compress(data, offset);
+    if (offset < data.length) { this.block.set(data.subarray(offset), 0); this.filled = data.length - offset; }
+    return this;
+  }
+
+  hex(): string {
+    const bitLength = this.total * 8;
+    const tail = new Uint8Array(this.filled + 9 <= 64 ? 64 : 128);
+    tail.set(this.block.subarray(0, this.filled));
+    tail[this.filled] = 0x80;
+    const view = new DataView(tail.buffer);
+    view.setUint32(tail.length - 8, Math.floor(bitLength / 0x100000000));
+    view.setUint32(tail.length - 4, bitLength >>> 0);
+    for (let offset = 0; offset < tail.length; offset += 64) this.compress(tail, offset);
+    let out = "";
+    for (const word of this.h) out += word.toString(16).padStart(8, "0");
+    return out;
+  }
+
+  private compress(data: Uint8Array, offset: number): void {
+    const { h, w } = this;
+    for (let i = 0; i < 16; i += 1) {
+      const p = offset + i * 4;
+      w[i] = ((data[p]! << 24) | (data[p + 1]! << 16) | (data[p + 2]! << 8) | data[p + 3]!) >>> 0;
+    }
     for (let i = 16; i < 64; i += 1) {
       const a = w[i - 15]!;
       const b = w[i - 2]!;
@@ -42,7 +79,9 @@ export function sha256Hex(data: Uint8Array): string {
     h[0] = (h[0]! + a) >>> 0; h[1] = (h[1]! + b) >>> 0; h[2] = (h[2]! + c) >>> 0; h[3] = (h[3]! + d) >>> 0;
     h[4] = (h[4]! + e) >>> 0; h[5] = (h[5]! + f) >>> 0; h[6] = (h[6]! + g) >>> 0; h[7] = (h[7]! + hh) >>> 0;
   }
-  let out = "";
-  for (const word of h) out += word.toString(16).padStart(8, "0");
-  return out;
+}
+
+/** One-shot SHA-256 for small inputs (one slice); use `Sha256` across turns for large buffers. */
+export function sha256Hex(data: Uint8Array): string {
+  return new Sha256().update(data).hex();
 }

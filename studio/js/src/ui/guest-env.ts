@@ -8,3 +8,6 @@ export const guestTimers: Timers = {
   after: (ms, fn) => after(ms / 1000, fn),
   now: () => Date.now(),
 };
+
+/** Continues in a later guest turn (next frame), resetting the 250 ms per-turn interrupt budget. */
+export const yieldTurn = (): Promise<void> => new Promise((resolve) => { after(0.001, () => resolve()); });

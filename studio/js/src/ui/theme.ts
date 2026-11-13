@@ -4,3 +4,6 @@ export const C = {
   text: "#FAFAFA", body: "#E4E4E7", muted: "#A1A1AA", faint: "#71717A",
   danger: "#F87171", warn: "#F59E0B", ok: "#4ADE80", info: "#60A5FA",
 } as const;
+
+/** The Studio shell is dark-only; the code editor follows it (a light shell would switch this to "light"). */
+export const CODE_THEME = "dark" as const;
