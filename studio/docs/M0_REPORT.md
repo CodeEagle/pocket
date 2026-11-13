@@ -171,15 +171,18 @@ change `studio.fs` chunking and the `studio.preview` shape. Current mapping to r
 
 No SDK code was changed in M0.
 
-## 8. Waiting on the owner
+## 8. Owner decisions (2026-11-13)
 
-1. Which agent or model runs execution work, given `agy`/Argon is unavailable here (C1).
-2. Run the spikes on a Mac, or give this environment access to `codeload.github.com` so at least
-   the compiler, Rust tests and guest-side measurements can run.
-3. Confirm VN editor, WeChat, Bluetooth and Codex are out of scope for the Pocket Studio v1 (3.6).
-4. Approve the SDK changes the plan now depends on: raw text input with modifiers, multi-line
-   `InputField`, configurable text-cache size, clipboard plugin, new fs/build routes, and a preview
-   child loading path (option a or b).
+1. Execution work is delegated to **Sonnet** workers in place of Argon Low (C1). Workers do not
+   spawn agents and do not revert each other's edits.
+2. Environment access: a personal `pocket` cloud environment now allows `codeload.github.com`
+   (pinned PocketJS) and `storage.googleapis.com` (pinned Flutter). Validation is repeated there.
+   Profile timings and IME checks for the spikes still need a Mac.
+3. **Confirmed out of v1 scope:** VN editor, WeChat preview, Noble Bluetooth, Codex. The web
+   Studio keeps serving them after M6. It is not deleted.
+4. **Approved SDK changes:** raw text input with modifiers, multi-line `InputField`, configurable
+   text-cache size, clipboard plugin, new fs/build service routes, preview child loading path.
+   Each lands in `sdk/` with tests and an `sdk/docs/` record (C4).
 
 ## 9. Re-cut estimate
 
