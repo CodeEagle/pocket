@@ -7,17 +7,10 @@ import { spawnSync } from "node:child_process";
 test("mesh patch applies to the pinned predecessor and is repeatably detectable", () => {
   const sdk = resolve(import.meta.dir, "../..");
   const drawTarget = "engine/core/src/draw.rs";
-  const patchNames = [
-    "image-mesh.patch",
-    "image-mesh-subpixel.patch",
-    "inline-text-core.patch",
-    "native-rounded-rects.patch",
-    "native-rounded-shadows.patch",
-    "native-arcs.patch",
-    "native-rounded-gradients.patch",
-    "native-rounded-radius-threshold.patch",
-    "host-native-fonts.patch",
-  ];
+  const bootstrap = readFileSync(join(sdk, "scripts/prepare_upstream.py"), "utf8");
+  const patchList = bootstrap.slice(bootstrap.indexOf("PATCHES = ("), bootstrap.indexOf("SUPERSEDED_PATCH_MARKERS ="));
+  const names = [...patchList.matchAll(/\("([^"]+\.patch)",/g)].map(match => match[1]!);
+  const patchNames = names.slice(names.indexOf("image-mesh.patch"));
   const allPatches = patchNames.map(name => readFileSync(join(sdk, "native/patches", name), "utf8"));
   const sectionFor = (source: string, target: string) => {
     const gitSections = [...source.matchAll(/^diff --git /gm)].map(match => match.index!);
@@ -28,9 +21,13 @@ test("mesh patch applies to the pinned predecessor and is repeatably detectable"
       const section = source.slice(starts[i], starts[i + 1] ?? source.length);
       if (section.includes(`+++ b/${target}`)) return section;
     }
-    throw new Error(`patch does not contain ${target}`);
+    return null;
   };
-  const patches = allPatches.map(source => sectionFor(source, drawTarget));
+  const relevant = allPatches.flatMap((source, index) => {
+    const patch = sectionFor(source, drawTarget);
+    return patch === null ? [] : [{ name: patchNames[index]!, patch }];
+  });
+  const patches = relevant.map(item => item.patch);
   const temporary = join(tmpdir(), `pocket-mesh-patch-${process.pid}-${Date.now()}`);
   try {
     const path = join(temporary, drawTarget);
@@ -54,7 +51,7 @@ test("mesh patch applies to the pinned predecessor and is repeatably detectable"
     // version markers.
     for (let index = patches.length - 1; index > 0; index--) {
       const result = apply(patches[index]!, true);
-      expect(result.status, `${patchNames[index]}: ${result.stdout}${result.stderr}`).toBe(0);
+      expect(result.status, `${relevant[index]!.name}: ${result.stdout}${result.stderr}`).toBe(0);
       expect(result.stdout + result.stderr).not.toMatch(/ignored|skipping|failed/i);
     }
     const reverseBase = apply(patches[0]!, true);

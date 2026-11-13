@@ -42,6 +42,7 @@ PATCHES = (
     ("focus-display-filter.patch", "focus display filtering"),
     ("modal-transparent-backdrop.patch", "transparent modal backdrop"),
     ("image-mesh.patch", "retained image mesh"),
+    ("image-mesh-dedup.patch", "retained image mesh byte deduplication"),
     ("image-mesh-subpixel.patch", "subpixel retained mesh DrawList"),
     ("image-mesh-subpixel-backends.patch", "subpixel mesh backend readers"),
     ("image-high-resolution-pak.patch", "bounded high-resolution IMG entries"),
@@ -101,9 +102,23 @@ SUPERSEDED_PATCH_MARKERS = {
         ),
     },
     "retained image mesh": {
-        # The later float-op and high-resolution patches supersede a few
+        # The follow-up byte-dedup patch supersedes the added mesh.rs section
+        # while retaining its full contract. Later float-op and high-resolution
+        # patches also supersede a few
         # version/spec/mesh-emitter hunks while preserving the retained-mesh
         # contract. These markers accept only that complete successor state.
+        "engine/core/src/mesh.rs": (
+            "pub(crate) struct ImageMesh {",
+            "pub fn set_mesh(&mut self, id: i32, texture: i32, bytes: &[u8]) -> bool",
+            "if bytes.is_empty() { self.set_image(id, -1); return true; }",
+            "if tex_resolve(&self.textures, texture).is_none() || bytes.len() < 16 { return false; }",
+            "node.tex == texture",
+            "node.sprite_frames == 0",
+            "node.mesh.as_ref().map_or(false, |mesh| mesh.bytes.as_slice() == bytes)",
+            "if word(bytes, 0) != 0x31534d50",
+            "self.mesh_bytes - old + needed > BUDGET",
+            "pub fn set_mesh_effect(&mut self, id: i32, bytes: &[u8]) -> bool",
+        ),
         "contracts/generated/pocket_spec.h": (
             "#define POCKET_DRAW_LIST_VERSION 5U",
             "#define POCKET_DRAW_OP_TEX_TRI_FLOAT 15U",

@@ -226,3 +226,57 @@ fn retained_mesh_drawlist_keeps_fractional_positions() {
         x.fract() != 0.0 || y.fract() != 0.0
     }), "Core output should retain the input mesh's quarter-pixel coordinate: {words:?}");
 }
+
+#[test]
+fn equal_mesh_submission_recovers_after_image_clear_and_validates_texture_lifetime() {
+    let mut ui = Ui::new();
+    ui.set_viewport(100.0, 100.0);
+    let node = ui.create_node(spec::NodeType::Image as u8);
+    ui.insert_before(spec::ROOT_ID, node, 0);
+    ui.set_prop(node, spec::prop::WIDTH, 100.0);
+    ui.set_prop(node, spec::prop::HEIGHT, 100.0);
+    let texture = ui.upload_texture(&[255; 16], 2, 2, spec::psm::PSM_8888);
+    let second = ui.upload_texture(&[128; 16], 2, 2, spec::psm::PSM_8888);
+    let bytes = geometry(10.0);
+    assert!(ui.set_mesh(node, texture, &bytes));
+    let original = ui.draw().words.clone();
+    let allocation = ui.mesh_memory_bytes();
+    assert_eq!(original[0], spec::draw_op::TEX_TRI_FLOAT);
+    assert!(ui.set_mesh(node, texture, &bytes));
+    assert_eq!(ui.draw().words, original);
+    assert_eq!(ui.mesh_memory_bytes(), allocation);
+
+    ui.set_image(node, -1);
+    assert_eq!(ui.mesh_memory_bytes(), 0);
+    assert!(ui.draw().words.is_empty());
+    assert!(ui.set_mesh(node, texture, &bytes));
+    assert_eq!(ui.draw().words, original, "identical bytes must reinstall a cleared mesh");
+    assert_eq!(ui.mesh_memory_bytes(), allocation);
+
+    ui.set_image(node, texture);
+    assert_eq!(ui.mesh_memory_bytes(), 0);
+    assert!(ui.set_mesh(node, texture, &bytes));
+    assert_eq!(ui.draw().words, original, "keeping the same texture does not keep the old mesh");
+
+    ui.set_sprite(node, texture, 2, 2, 1);
+    assert_eq!(ui.mesh_memory_bytes(), 0);
+    assert!(ui.set_mesh(node, texture, &bytes));
+    assert_eq!(ui.draw().words, original, "a sprite write must not leave a stale mesh cache");
+
+    assert!(ui.set_mesh(node, second, &bytes));
+    let changed_texture = ui.draw().words.clone();
+    assert_ne!(changed_texture, original, "texture identity participates in the update");
+    ui.free_texture(second);
+    assert!(!ui.set_mesh(node, second, &bytes), "an equal retained payload cannot validate a freed texture");
+    assert!(ui.set_mesh(node, texture, &bytes));
+    assert_eq!(ui.draw().words, original);
+
+    let mut invalid = bytes.clone();
+    invalid[16..20].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(!ui.set_mesh(node, texture, &invalid));
+    assert_eq!(ui.draw().words, original, "a rejected mutation leaves the valid retained mesh intact");
+    assert!(ui.set_mesh(node, texture, &[]));
+    assert_eq!(ui.mesh_memory_bytes(), 0);
+    assert!(ui.set_mesh(node, texture, &bytes));
+    assert_eq!(ui.draw().words, original, "the explicit empty mesh clear must also allow restoration");
+}

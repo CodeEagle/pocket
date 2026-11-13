@@ -3759,7 +3759,7 @@ final class _PocketEdgeBackListenerState
     // Match Flutter's drag recognizer: velocity uses down/move samples only.
     final velocity = _velocity?.getVelocity().pixelsPerSecond.dx ?? 0;
     final delta = event.position - _origin!;
-    final horizontal = delta.dx > delta.dy.abs() && delta.dy.abs() <= 72;
+    final horizontal = delta.dx > delta.dy.abs();
     final completed =
         horizontal &&
         (delta.dx >= 88 || (delta.dx >= kTouchSlop && velocity > 260));

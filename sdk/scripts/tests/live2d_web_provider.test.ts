@@ -83,6 +83,39 @@ function readF32(bytes: Uint8Array, offset: number): number {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat32(offset, true);
 }
 
+test("PMS1 packing preserves little-endian bytes and validates in-place Core mutations", async () => {
+  const fixture = fakeCore();
+  const provider = createLive2dProvider({ core: async () => fixture.core, readAsset: async () => new Uint8Array([1]) });
+  try {
+    const info = await provider.invoke(LOAD, { id: "packing", mocAsset: "model.moc3", textures: ["page.png"] });
+    const update = () => provider.invoke(UPDATE, { modelId: info.modelId, parameters: [], partOpacities: [], cacheStaticTopology: true });
+    const first = await update();
+    const expected = new Uint8Array(76);
+    const view = new DataView(expected.buffer);
+    [0x31534d50, 3, 3, 0xffffffff].forEach((value, i) => view.setUint32(i * 4, value, true));
+    [10, 20, 0.25, 1 - Math.fround(0.2), 12, 20, 0.75, 1 - Math.fround(0.2), 10, 18, 0.25, 1 - Math.fround(0.8)]
+      .forEach((value, i) => view.setFloat32(16 + i * 4, value, true));
+    [0, 1, 2].forEach((value, i) => view.setUint32(64 + i * 4, value, true));
+    expect(first.drawables[0].meshBytes).toEqual(expected);
+    const d = fixture.lastModel.drawables;
+    d.vertexUvs[0][0] = 0.5;
+    d.indices[0][1] = 2;
+    const changed = await update();
+    expect(readF32(changed.drawables[0].meshBytes, 24)).toBe(0.5);
+    expect(readU32(changed.drawables[0].meshBytes, 68)).toBe(2);
+    d.vertexUvs[0][0] = NaN;
+    await expect(update()).rejects.toMatchObject({ code: "live2d_core_invalid" });
+    d.vertexUvs[0][0] = 0.5;
+    d.indices[0] = [-1, 1, 2];
+    await expect(update()).rejects.toMatchObject({ code: "live2d_core_invalid" });
+    d.indices[0] = [3, 1, 2];
+    await expect(update()).rejects.toMatchObject({ code: "live2d_mesh_invalid" });
+    d.indices[0] = [0, 1, 2];
+    d.multiplyColors[0] = NaN;
+    await expect(update()).rejects.toMatchObject({ code: "live2d_core_invalid" });
+  } finally { await provider.dispose(); }
+});
+
 test("Web provider reuses the native Live2D contract and emits placed PMS1 meshes", async () => {
   const fixture = fakeCore();
   const readCalls: string[] = [];

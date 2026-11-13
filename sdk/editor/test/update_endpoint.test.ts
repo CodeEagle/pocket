@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { chooseUpdateHost, startUpdateEndpoint } from "../update_endpoint.ts";
+import { chooseUpdateHost, isLocalNetworkAddress, startUpdateEndpoint } from "../update_endpoint.ts";
+
+test("Editor socket peers must be loopback or private/link-local addresses", () => {
+  for (const address of ["127.0.0.1", "127.0.0.2", "10.0.0.2", "172.16.0.1", "172.31.255.254", "192.168.50.1", "169.254.1.2", "::1", "0:0:0:0:0:0:0:1", "fc00::1", "fd12:3456::1", "fe80::1%en0", "febf::1", "::ffff:192.168.50.1", "::ffff:7f00:1"]) {
+    expect(isLocalNetworkAddress(address), address).toBe(true);
+  }
+  for (const address of ["8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.0.1", "0.0.0.0", "::", "2001:db8::1", "fc::1", "fe8::1", "fec0::1", "::ffff:8.8.8.8", "::ffff:808:808", "evil.example", "192.168.1.999", ""]) {
+    expect(isLocalNetworkAddress(address), address).toBe(false);
+  }
+});
 
 test("device update host selects LAN and rejects loopback-only interfaces", () => {
   const entry = (address: string, internal = false) => ({ address, internal, family: "IPv4" } as any);

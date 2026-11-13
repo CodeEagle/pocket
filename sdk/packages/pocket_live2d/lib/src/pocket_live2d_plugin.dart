@@ -79,10 +79,12 @@ const PocketPluginSchema _drawable = PocketPluginSchema.object(
     'constantFlags': _integer,
     'dynamicFlags': _integer,
     'opacity': _number,
-    // Ready PMS1 bytes (16-byte header, interleaved x/y/u/1-v float32, uint32
-    // indices) packed in C++/Dart at the native IO boundary.
+    // Exactly one mesh representation is present: negotiated PMS1 bytes or
+    // the compatible positions/UV/index arrays.
     'meshBytes': const PocketPluginSchema.unknown(),
-    // Optional only for the explicit cached-topology response.
+    'positionsXYPixels': const PocketPluginSchema.unknown(),
+    'uvs': const PocketPluginSchema.unknown(),
+    'indices': const PocketPluginSchema.unknown(),
     'maskIndices': const PocketPluginSchema.unknown(),
     'multiplyColorRgba': const PocketPluginSchema.unknown(),
     'screenColorRgba': const PocketPluginSchema.unknown(),
@@ -96,7 +98,6 @@ const PocketPluginSchema _drawable = PocketPluginSchema.object(
     'constantFlags',
     'dynamicFlags',
     'opacity',
-    'meshBytes',
     'multiplyColorRgba',
     'screenColorRgba',
   },
@@ -153,6 +154,7 @@ const PocketPluginSchema _updateParameters = PocketPluginSchema.object(
     'partOpacities': PocketPluginSchema.array(_parameterValue),
     'placement': _placement,
     'cacheStaticTopology': PocketPluginSchema.boolean(),
+    'meshFormat': PocketPluginSchema.enumValue(<Object?>['pms1']),
   },
   required: <String>{'modelId', 'parameters', 'partOpacities'},
 );
@@ -487,6 +489,14 @@ final class PocketLive2dPlugin extends PocketPlugin {
 
   Future<Object?> update(Map<String, dynamic> params) {
     final modelId = _parseModelId(params['modelId']);
+    final rawMeshFormat = params['meshFormat'];
+    if (rawMeshFormat != null && rawMeshFormat != 'pms1') {
+      throw const PocketCapabilityException(
+        'invalid_request',
+        'meshFormat must be pms1 when present',
+      );
+    }
+    final packedMesh = rawMeshFormat == 'pms1';
     final rawCacheStaticTopology = params['cacheStaticTopology'];
     if (rawCacheStaticTopology != null && rawCacheStaticTopology is! bool) {
       throw const PocketCapabilityException(
@@ -620,6 +630,7 @@ final class PocketLive2dPlugin extends PocketPlugin {
           }
           drawables.add(
             drawable.toJson(
+              packedMesh: packedMesh,
               includeTopology: includeTopology,
               placement: placement,
               uvsOverride: expected?.uvs,

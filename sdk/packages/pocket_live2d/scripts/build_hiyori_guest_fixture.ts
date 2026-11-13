@@ -67,6 +67,7 @@ writeFileSync(join(projectRoot, "novel.assets.json"), JSON.stringify({
     hiyori: {
       kind: "live2d",
       source: "models/Hiyori/Hiyori.model3.json",
+      interactive: true,
       animations: ["Idle:0"],
       textures: {
         "Hiyori.2048/texture_00.png": "models/Hiyori/Hiyori.2048/texture_00.png",
@@ -93,8 +94,8 @@ const story = {
   start: "opening",
   script: {
     opening: [
-      { type: "scene", characters: [
-        { id: "hiyori", expression: "neutral", position: "center", model: { key: "hiyori", animation: "Idle:0", loop: true } },
+      { type: "scene", camera: { x: 0, y: 0, scale: 1.4 }, characters: [
+        { id: "hiyori", expression: "neutral", position: "center", scale: 1.5, rotation: 12, model: { key: "hiyori" } },
       ] },
       { type: "say", id: "pixel-proof", speaker: "Hiyori", text: "The official Core moves this mesh through the Pocket host." },
     ],

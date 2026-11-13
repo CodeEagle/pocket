@@ -36,6 +36,7 @@ let currentFile = "app.tsx";
 let projectFiles = [];
 let buildPollTimer = null;
 let deployPollTimer = null;
+let startingBuild = false;
 let dirty = false;
 let saving = false;
 let publishing = false;
@@ -77,6 +78,12 @@ let resourcesGeneration = 0;
 let versionSnapshot = null;
 let versionsLoading = false;
 let versionsGeneration = 0;
+let publishTargets = null;
+let publishTargetsLoading = false;
+let publishTargetsError = "";
+let publishTargetsGeneration = 0;
+let publishTargetChannel = "test";
+let publishTargetContext = null;
 let studioUpgradeState = null;
 let studioUpgradePollTimer = null;
 let studioUpgradePeriodicTimer = null;
@@ -422,9 +429,14 @@ function updateActionStates() {
   const hasProject = Boolean(currentId);
   const busy = Boolean(currentStatus?.busy);
   const built = Boolean(currentStatus && currentStatus.builtRevision === currentStatus.revision && !currentStatus.error);
-  const workLocked = busy || startingDeploy || Boolean(activeDeploy && activeDeploy.status !== "running") || publishing || resourcesSaving;
+  const publishTarget = activePublishTarget();
+  const publishTargetAvailable = publishTargetContext
+    ? Boolean(publishTarget && publishTarget.canSelect !== false && publishTarget.ownerProjectId && publishTarget.projectId === currentId)
+    : !publishTarget || publishTarget.kind !== "reused" || (publishTarget.canSelect !== false && publishTarget.ownerProjectId && publishTarget.projectId === currentId);
+  const canPublishCurrentTarget = hasProject && built && publishTargetAvailable && publishTarget?.canPublish !== false && !publishTargetsLoading && !dirty && !resourcesDirty;
+  const workLocked = busy || startingBuild || startingDeploy || Boolean(activeDeploy && activeDeploy.status !== "running") || saving || publishing || resourcesSaving;
   $("save").disabled = !hasProject || !dirty || saving || workLocked;
-  $("build").disabled = !hasProject || workLocked || saving;
+  $("build").disabled = !hasProject || !publishTargetAvailable || workLocked || saving;
   if ($("novel-open")) $("novel-open").disabled = !hasProject || workLocked;
   $("refresh-source").disabled = !hasProject || workLocked;
   $("refresh-preview").disabled = !hasProject || busy;
@@ -458,30 +470,399 @@ function updateActionStates() {
     if (url) wechatOpen.href = url;
     else wechatOpen.removeAttribute("href");
   }
-  $("publish").disabled = !hasProject || !built || workLocked;
-  $("publish-test").disabled = !hasProject || !built || workLocked;
-  if ($("version-publish-test")) $("version-publish-test").disabled = !hasProject || !built || workLocked;
-  if ($("version-publish-release")) $("version-publish-release").disabled = !hasProject || !built || workLocked;
+  $("publish-test").disabled = !canPublishCurrentTarget || workLocked;
+  if ($("open-version-manager-from-signing")) $("open-version-manager-from-signing").disabled = !hasProject;
+  if ($("publish-target-picker")) $("publish-target-picker").disabled = !hasProject || publishTargetsLoading || workLocked;
+  if ($("publish-target-channel")) $("publish-target-channel").disabled = !hasProject || publishTargetsLoading || workLocked;
   $("versions-open").disabled = !hasProject;
   $("versions-refresh").disabled = !hasProject || versionsLoading;
+  updatePublishTargetIndicators();
   updateResourceActionStates(workLocked);
+}
+
+function setPublishEditorLocked(locked) {
+  sourceEl.readOnly = locked;
+  if ($("file-picker")) $("file-picker").disabled = locked || !currentId;
+  for (const id of ["config-name", "config-app-id", "config-version", "config-build", "config-tick"]) {
+    const field = $(id);
+    if (field) field.disabled = locked || !currentId;
+  }
+}
+
+function currentProjectTitle() {
+  return $("config-name")?.value || projects.find((project) => project.id === currentId)?.name || currentId || "项目";
+}
+
+function currentProjectAppId() {
+  return $("config-app-id")?.value || projects.find((project) => project.id === currentId)?.appId || "—";
+}
+
+function updateProjectHeading(project, config = project) {
+  const name = config?.name || project?.name || currentId || "项目";
+  const appId = config?.appId || project?.appId || "—";
+  const source = project?.source?.kind === "catalog-miniapp" ? project.source : null;
+  if (source) {
+    setText("project-title", `${source.sourceProjectTitle} › MiniApp ${name}`);
+    setText("project-subtitle", `${source.sourceProjectTitle} 内 MiniApp · 源码 ${source.sourcePath} · ${appId}`);
+    return;
+  }
+  setText("project-title", name);
+  setText("project-subtitle", `${appId} · ${config?.framework || "solid"} · ${config?.entry || "app.tsx"}`);
+}
+
+function activePublishTarget() {
+  const targets = Array.isArray(publishTargets?.targets) ? publishTargets.targets : [];
+  if (publishTargetContext && publishTargets && publishTargetContext.sourceProjectId === publishTargets.currentProjectId) {
+    return targets.find((target) => target.appId === publishTargetContext.appId) || null;
+  }
+  return targets.find((target) => target.kind === "root" && target.projectId === currentId)
+    || targets.find((target) => target.projectId === currentId)
+    || null;
+}
+
+function publishChannelLabel(channel = publishTargetChannel) {
+  return channel === "release" ? "稳定版" : "测试版";
+}
+
+function publishTargetLabel() {
+  if (publishTargetContext && publishTargets && publishTargetContext.sourceProjectId === publishTargets.currentProjectId) {
+    const target = activePublishTarget();
+    const title = `MiniApp ${target?.title || publishTargetContext.appId}`;
+    const sourceTitle = target?.sourceProjectTitle || publishTargetContext.sourceProjectTitle;
+    return sourceTitle ? `${sourceTitle} › ${title}` : `${title} (${publishTargetContext.appId})`;
+  }
+  return `主应用 ${currentProjectAppId()} · ${currentProjectTitle()}`;
+}
+
+function publishTargetStatusLabel() {
+  if (!currentId) return "请选择项目";
+  if (publishTargetsLoading) return "正在读取发布目标…";
+  const target = activePublishTarget();
+  if (target?.kind === "reused" && target.canSelect === false) return target.reason || "此应用暂不可发布";
+  if (target?.kind === "reused" && target.projectId !== currentId) return "MiniApp 源码上下文已变化，请重新选择目标";
+  if (target?.busy) return "构建中";
+  if (target?.canPublish === false && target.built === false) return "需先构建";
+  if (target?.kind === "root" && target.canPublish === false && target.reason) return target.reason;
+  if (dirty) return "有未保存修改，请先保存并构建";
+  if (resourcesDirty) return "资源策略尚未保存";
+  const status = currentStatus;
+  if (status?.busy) return "构建中";
+  if (status?.error) return "最近构建失败，请重新构建";
+  if (status && status.builtRevision === status.revision) return "已构建，可发布";
+  return "需先构建";
+}
+
+function publishTargetScopeLabel() {
+  const target = activePublishTarget();
+  const channel = `当前显示：${publishChannelLabel()}发布状态。`;
+  if (target?.kind === "reused" || (publishTargetContext && publishTargets && publishTargetContext.sourceProjectId === publishTargets.currentProjectId)) {
+    const sourceTitle = target?.sourceProjectTitle || publishTargetContext?.sourceProjectTitle;
+    const sourcePath = target?.sourcePath || publishTargetContext?.sourcePath;
+    const sourceLabel = sourcePath
+      ? `${sourceTitle || publishTargetContext?.sourceProjectId} 内 MiniApp ${target?.title || publishTargetContext?.appId} · 源码 ${sourcePath}`
+      : `MiniApp 发布记录 ${target?.ownerTitle || publishTargetContext?.ownerTitle || currentProjectTitle()}`;
+    const version = target?.publishedVersion
+      ? `当前已发布 v${target.publishedVersion}${target.publishedBuild !== undefined ? ` build ${target.publishedBuild}` : ""}`
+      : `此频道暂无已发布版本`;
+    return `发布范围：${sourceLabel} · ${version}。${channel}`;
+  }
+  return `发布范围：主应用 ${currentProjectAppId()}，并包含此项目内普通子包；复用 MiniApp 使用各自所属项目的已发布版本。${channel}`;
+}
+
+function renderPublishTargetPicker() {
+  const picker = $("publish-target-picker");
+  const channelPicker = $("publish-target-channel");
+  const reusedList = $("publish-target-reused");
+  if (channelPicker) channelPicker.value = publishTargetChannel;
+  if (!picker) return;
+  picker.replaceChildren();
+  const targets = Array.isArray(publishTargets?.targets) ? publishTargets.targets : [];
+  const contextSourceProjectId = publishTargetContext?.sourceProjectId;
+  const fallbackSourceRoot = contextSourceProjectId && contextSourceProjectId !== currentId
+    ? {
+      projectId: contextSourceProjectId,
+      appId: projects.find((project) => project.id === contextSourceProjectId)?.appId || contextSourceProjectId,
+      title: projects.find((project) => project.id === contextSourceProjectId)?.name || contextSourceProjectId,
+      kind: "root",
+    }
+    : null;
+  const contextRoot = fallbackSourceRoot
+    ? targets.find((target) => target.kind === "root" && target.projectId === contextSourceProjectId) || fallbackSourceRoot
+    : null;
+  const root = targets.find((target) => target.kind === "root" && target.projectId === currentId)
+    || targets.find((target) => target.kind === "root" && target.projectId === publishTargets?.currentProjectId)
+    || contextRoot
+    || targets.find((target) => target.projectId === currentId)
+    || {
+      projectId: currentId,
+      appId: currentProjectAppId(),
+      title: currentProjectTitle(),
+      kind: "root",
+    };
+  const optionTargets = targets.length ? [...targets] : currentId ? [root] : [];
+  if (contextRoot && !optionTargets.some((target) => target.kind === "root" && target.projectId === contextSourceProjectId)) {
+    optionTargets.unshift(contextRoot);
+  }
+  const selectedContextTargetExists = Boolean(
+    publishTargetContext
+    && optionTargets.some((target) => target.appId === publishTargetContext.appId),
+  );
+  const needsReturnPlaceholder = Boolean(
+    publishTargetContext
+    && contextSourceProjectId !== currentId
+    && !selectedContextTargetExists,
+  );
+  if (needsReturnPlaceholder) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = `MiniApp ${publishTargetContext.appId} 暂不可用 · 选择主应用返回`;
+    picker.append(option);
+  }
+  for (const target of optionTargets) {
+    const option = document.createElement("option");
+    option.value = target.appId || target.projectId || "";
+    if (target.kind === "reused") {
+      const latest = target.publishedVersion
+        ? ` · 当前已发布 v${target.publishedVersion}${target.publishedBuild !== undefined ? ` build ${target.publishedBuild}` : ""}`
+        : " · 尚无此频道发布记录";
+      const sourceLabel = target.sourcePath
+        ? `${target.sourceProjectTitle || publishTargets?.currentProjectId} 内 MiniApp ${target.title || target.appId} · 源码 ${target.sourcePath}`
+        : `MiniApp ${target.title || target.appId} (${target.appId}) · 发布项目 ${target.ownerTitle || target.ownerProjectId}`;
+      option.textContent = `${sourceLabel}${latest}`;
+      option.title = `${sourceLabel} · ${target.appId}`;
+      option.disabled = target.canSelect === false || !target.ownerProjectId;
+    } else {
+      option.textContent = `主应用 ${target.appId || currentProjectAppId()} · ${target.title || currentProjectTitle()}`;
+    }
+    picker.append(option);
+  }
+  if (!optionTargets.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = publishTargetsLoading ? "正在加载发布目标…" : "无可用发布目标";
+    picker.append(option);
+  }
+  const preferredAppId = needsReturnPlaceholder
+    ? ""
+    : publishTargetContext && publishTargets && publishTargetContext.sourceProjectId === publishTargets.currentProjectId
+    ? publishTargetContext.appId
+    : root.appId || currentProjectAppId();
+  picker.value = preferredAppId;
+  if (picker.selectedIndex < 0 && picker.options.length) picker.selectedIndex = 0;
+
+  if (reusedList) {
+    reusedList.replaceChildren();
+    const reused = targets.filter((target) => target.kind === "reused");
+    reusedList.hidden = reused.length === 0;
+    for (const target of reused) {
+      const row = document.createElement("div");
+      row.className = "publish-target-reused-item";
+      const title = document.createElement("strong");
+      title.textContent = target.sourcePath
+        ? `${target.sourceProjectTitle || publishTargets?.currentProjectId} 内 MiniApp · ${target.title || target.appId}`
+        : `MiniApp ${target.title || target.appId} (${target.appId})`;
+      const detail = document.createElement("span");
+      const owner = target.ownerTitle || target.ownerProjectId || "所属项目未解析";
+      const ownerIdentity = target.ownerProjectId ? ` (${target.ownerProjectId})` : "";
+      const ownerVersion = target.version ? ` · 项目 v${target.version}` : "";
+      const ownerBuild = target.build !== undefined ? ` build ${target.build}` : "";
+      const published = target.publishedVersion
+        ? ` · ${publishChannelLabel()}当前已发布 v${target.publishedVersion}${target.publishedBuild !== undefined ? ` build ${target.publishedBuild}` : ""}`
+        : " · 尚无此频道发布版本";
+      const buildState = target.busy ? " · 正在构建" : target.built ? " · 已构建" : " · 需先构建";
+      detail.textContent = target.canSelect === false || !target.ownerProjectId
+        ? `${target.reason || "无法解析此 MiniApp 的所属项目。"}`
+        : target.sourcePath
+          ? `源码：${target.sourcePath} · ${buildState}${published}`
+          : `发布项目：${owner}${ownerIdentity}${ownerVersion}${ownerBuild}${buildState}${published}`;
+      row.append(title, detail);
+      reusedList.append(row);
+    }
+  }
+  updatePublishTargetIndicators();
+}
+
+function updatePublishTargetIndicators() {
+  const targetName = publishTargetLabel();
+  const full = currentId ? `目标：${targetName} · ${publishChannelLabel()}` : "目标：请选择项目";
+  const label = $("publish-target-action-label");
+  if (label) {
+    label.textContent = full;
+    label.title = full;
+  }
+  const summary = $("publish-target-summary");
+  if (summary) {
+    summary.replaceChildren();
+    const title = document.createElement("strong");
+    title.textContent = targetName;
+    const detail = document.createElement("span");
+    detail.textContent = publishTargetStatusLabel();
+    summary.append(title, detail);
+  }
+  const scope = $("publish-target-scope");
+  if (scope) {
+    scope.textContent = publishTargetsError
+      ? `${publishTargetScopeLabel()} MiniApp 目标读取失败：${publishTargetsError}`
+      : publishTargetScopeLabel();
+  }
+  const testInfo = $("test-publish-info");
+  if (testInfo && currentStatus?.publish?.channel === "test") {
+    testInfo.hidden = publishTargetChannel !== "test";
+  }
+  const build = $("build");
+  if (build) build.title = `构建当前源码上下文：${currentProjectTitle()}（⌘B）`;
+  const action = $("publish-test");
+  if (action) action.textContent = publishTargetChannel === "test" ? "发布测试包" : "发布稳定版";
+  setText("publish-channel-eyebrow", publishTargetChannel === "test" ? "测试包 / 热更新" : "稳定版");
+  setText("test-publish-title", publishTargetChannel === "test" ? "发布到本地版本后端" : "发布到稳定频道");
+  setText("publish-channel-description", publishTargetChannel === "test"
+    ? "为递增的测试构建签名，并以只读方式提供给同一局域网中的模拟器和设备。"
+    : "将此构建签名并更新稳定频道。版本状态来自所选应用当前源码上下文。");
+}
+
+function setPublishTargets(payload, error = "") {
+  publishTargets = payload && Array.isArray(payload.targets) ? payload : null;
+  publishTargetsError = error ? String(error.message || error) : "";
+  publishTargetsLoading = false;
+  renderPublishTargetPicker();
+  updateActionStates();
+}
+
+function publishTargetsProjectId() {
+  return publishTargetContext?.sourceProjectId || currentId;
+}
+
+async function refreshPublishTargets(projectId = publishTargetsProjectId(), channel = publishTargetChannel) {
+  if (!projectId) return null;
+  const editorProjectId = currentId;
+  const generation = ++publishTargetsGeneration;
+  publishTargetsLoading = true;
+  publishTargetsError = "";
+  updateActionStates();
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(projectId)}/publish-targets?channel=${encodeURIComponent(channel)}`);
+    if (currentId !== editorProjectId || generation !== publishTargetsGeneration) return null;
+    setPublishTargets(payload);
+    return payload;
+  } catch (error) {
+    if (currentId !== editorProjectId || generation !== publishTargetsGeneration) return null;
+    setPublishTargets(null, error);
+    return null;
+  }
+}
+
+async function switchPublishTargetChannel(channel) {
+  if (channel !== "test" && channel !== "release") return;
+  if (channel === publishTargetChannel && !publishTargetsLoading) return publishTargets;
+  publishTargetChannel = channel;
+  if ($("publish-target-channel")) $("publish-target-channel").value = channel;
+  updateActionStates();
+  const payload = await refreshPublishTargets();
+  if (!payload) {
+    showNotice(`无法读取${publishChannelLabel(channel)}频道的发布目标。请刷新后重试。`, "error");
+    return null;
+  }
+  const context = publishTargetContext;
+  const target = context && payload?.targets?.find((entry) => entry.appId === context.appId && entry.kind === "reused");
+  let projectAligned = true;
+  if (context && target) {
+    if (target.canSelect === false || !target.ownerProjectId) {
+      showNotice(target.reason || `MiniApp ${target.appId} 在${publishChannelLabel(channel)}频道尚无可用的所属项目。`, "info");
+      return payload;
+    }
+    const ownerProjectId = target.ownerProjectId;
+    if (ownerProjectId !== currentId) {
+      const nextContext = {
+        ...context,
+        ownerProjectId,
+        ownerTitle: target.ownerTitle || target.title || ownerProjectId,
+        sourceProjectTitle: target.sourceProjectTitle || context.sourceProjectTitle,
+        sourcePath: target.sourcePath || context.sourcePath,
+      };
+      await selectProject(ownerProjectId, { publishTargetContext: nextContext });
+      projectAligned = currentId === ownerProjectId && !sourceEl.disabled;
+    } else if (ownerProjectId === currentId) {
+      publishTargetContext = {
+        ...context,
+        ownerProjectId,
+        ownerTitle: target.ownerTitle || target.title || ownerProjectId,
+        sourceProjectTitle: target.sourceProjectTitle || context.sourceProjectTitle,
+        sourcePath: target.sourcePath || context.sourcePath,
+      };
+      updatePublishTargetIndicators();
+    }
+  } else if (context) {
+    projectAligned = false;
+  }
+  const active = context && payload?.targets?.find((entry) => entry.appId === context.appId);
+  if (!projectAligned) {
+    showNotice(`已切换至${publishChannelLabel(channel)}频道，但所选 MiniApp 所属项目尚未打开。请处理未保存修改后再点“切换到所选应用”。`, "info");
+    return payload;
+  }
+  const projectText = active?.kind === "reused"
+    ? `MiniApp ${active.appId} · 所属项目 ${active.ownerTitle || active.projectId} · ${active.busy ? "构建中" : active.built ? "已构建" : "需先构建"}${active.publishedVersion ? ` · 当前已发布 v${active.publishedVersion}${active.publishedBuild !== undefined ? ` build ${active.publishedBuild}` : ""}` : " · 此频道暂无已发布版本"}。`
+    : `主应用 ${currentProjectAppId()}。`;
+  showNotice(`已切换至${publishChannelLabel(channel)}频道。${projectText}请确认目标和状态后再点击发布。`, "info");
+  return payload;
 }
 
 function renderProjects() {
   projectsEl.replaceChildren();
-  for (const project of projects) {
+  const renderProjectButton = (project, nested = false) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `project-item${project.id === currentId ? " active" : ""}`;
+    button.className = `project-item${nested ? " project-item-nested" : ""}${project.id === currentId ? " active" : ""}`;
     const name = document.createElement("strong");
-    name.textContent = project.name || project.id;
+    name.textContent = nested ? `MiniApp · ${project.name || project.id}` : project.name || project.id;
     const detail = document.createElement("small");
-    detail.textContent = `${project.id} · ${project.version || "—"}`;
+    detail.textContent = nested && project.source?.kind === "catalog-miniapp"
+      ? `${project.source.sourcePath} · ${project.appId} · v${project.version || "—"}`
+      : `${project.appId || project.id} · v${project.version || "—"}`;
     button.append(name, detail);
     button.addEventListener("click", () => {
-      void selectProject(project.id);
+      const source = project.source?.kind === "catalog-miniapp" ? project.source : null;
+      const publishTargetContext = source ? {
+        sourceProjectId: source.parentProjectId,
+        sourceProjectTitle: source.sourceProjectTitle,
+        sourcePath: source.sourcePath,
+        appId: project.appId,
+        ownerProjectId: project.id,
+        ownerTitle: project.name || project.id,
+      } : null;
+      void selectProject(project.id, publishTargetContext ? { publishTargetContext } : {});
     });
-    projectsEl.append(button);
+    return button;
+  };
+
+  const sourceProjects = projects.filter((project) => project.source?.kind === "catalog-miniapp");
+  const parentProjects = projects.filter((project) => project.source?.kind !== "catalog-miniapp");
+  const renderedSourceIds = new Set();
+  const renderSourceGroup = (title, children) => {
+    if (!children.length) return;
+    const group = document.createElement("section");
+    group.className = "project-child-group";
+    const heading = document.createElement("span");
+    heading.className = "project-child-heading";
+    heading.textContent = `${title} · MiniApps`;
+    group.append(heading);
+    for (const child of children) {
+      renderedSourceIds.add(child.id);
+      group.append(renderProjectButton(child, true));
+    }
+    projectsEl.append(group);
+  };
+
+  for (const project of parentProjects) {
+    projectsEl.append(renderProjectButton(project));
+    renderSourceGroup(
+      project.name || project.id,
+      sourceProjects.filter((source) => source.source.parentProjectId === project.id),
+    );
+  }
+  const ungroupedSources = sourceProjects.filter((project) => !renderedSourceIds.has(project.id));
+  if (ungroupedSources.length) {
+    const first = ungroupedSources[0].source;
+    renderSourceGroup(first.sourceProjectTitle, ungroupedSources);
   }
   if (!projects.length) {
     const empty = document.createElement("p");
@@ -1246,6 +1627,15 @@ function versionHistoryEntries(snapshot) {
             version: typeof pkg.version === "string" ? pkg.version : "",
             build: Number.isSafeInteger(pkg.build) ? pkg.build : null,
           })),
+        reusedPackages: Array.isArray(item.reusedPackages)
+          ? item.reusedPackages.filter((pkg) => pkg && typeof pkg === "object").map((pkg) => ({
+            id: String(pkg.id || "MiniApp"),
+            version: typeof pkg.version === "string" ? pkg.version : "",
+            build: Number.isSafeInteger(pkg.build) ? pkg.build : null,
+            ownerProjectId: typeof pkg.ownerProjectId === "string" ? pkg.ownerProjectId : "",
+            releaseId: typeof pkg.releaseId === "string" ? pkg.releaseId : "",
+          }))
+          : [],
       };
     });
 }
@@ -1318,11 +1708,20 @@ function renderVersionHistory(snapshot) {
     meta.textContent = entry.publishedAt ? `发布时间：${entry.publishedAt}` : "已发布版本";
     const packageSummary = document.createElement("div");
     packageSummary.className = "version-history-item-packages";
-    packageSummary.textContent = entry.packages.map((pkg) => [
-      pkg.id,
-      pkg.version ? `v${pkg.version}` : "",
-      pkg.build !== null ? `build ${pkg.build}` : "",
-    ].filter(Boolean).join(" · ")).join("；");
+    packageSummary.textContent = [
+      ...entry.packages.map((pkg) => [
+        pkg.id,
+        pkg.version ? `v${pkg.version}` : "",
+        pkg.build !== null ? `build ${pkg.build}` : "",
+      ].filter(Boolean).join(" · ")),
+      ...entry.reusedPackages.map((pkg) => [
+        `复用 MiniApp ${pkg.id}`,
+        pkg.version ? `v${pkg.version}` : "",
+        pkg.build !== null ? `build ${pkg.build}` : "",
+        pkg.ownerProjectId ? `所属项目 ${pkg.ownerProjectId}` : "",
+        pkg.releaseId ? `版本 ${pkg.releaseId}` : "",
+      ].filter(Boolean).join(" · ")),
+    ].join("；");
     main.append(title, meta, packageSummary);
     const links = document.createElement("div");
     links.className = "version-history-item-links";
@@ -1450,7 +1849,11 @@ function renderVersionManagement() {
     title.textContent = [slotLabel, slotVersion ? `v${slotVersion}` : "", slotBuild !== undefined ? `构建 ${slotBuild}` : ""].filter(Boolean).join(" · ");
     const count = document.createElement("span");
     count.className = "meta-chip";
-    count.textContent = `${slot.packages?.length || 0} 个资源包`;
+    const packageCount = slot.packages?.length || 0;
+    const reusedPackageCount = slot.reusedPackages?.length || 0;
+    count.textContent = reusedPackageCount
+      ? `${packageCount} 个自有包 · ${reusedPackageCount} 个复用 MiniApp`
+      : `${packageCount} 个资源包`;
     const headingActions = document.createElement("div");
     headingActions.className = "version-slot-heading-actions";
     headingActions.append(count);
@@ -1478,6 +1881,30 @@ function renderVersionManagement() {
       identity.textContent = `${role} · v${pkg.version} · 构建 ${pkg.build}`;
       packageTitle.append(id, identity);
       item.append(packageTitle);
+      card.append(item);
+    }
+    for (const pkg of slot.reusedPackages || []) {
+      const item = document.createElement("div");
+      item.className = "version-package";
+      const packageTitle = document.createElement("div");
+      packageTitle.className = "version-package-title";
+      const id = document.createElement("strong");
+      id.textContent = `MiniApp ${pkg.id}`;
+      id.title = `MiniApp ${pkg.id}`;
+      const identity = document.createElement("span");
+      identity.textContent = [
+        pkg.version ? `v${pkg.version}` : "",
+        Number.isSafeInteger(pkg.build) ? `构建 ${pkg.build}` : "",
+      ].filter(Boolean).join(" · ");
+      packageTitle.append(id, identity);
+      item.append(packageTitle);
+      const owner = document.createElement("span");
+      owner.className = "version-history-item-meta";
+      owner.textContent = [
+        pkg.ownerProjectId ? `所属项目 ${pkg.ownerProjectId}` : "",
+        pkg.releaseId ? `已发布版本 ${pkg.releaseId}` : "",
+      ].filter(Boolean).join(" · ");
+      item.append(owner);
       card.append(item);
     }
     slots.append(card);
@@ -1527,9 +1954,9 @@ function renderArtifacts(status) {
   if (!publish) {
     publishStatus.textContent = "尚未发布";
   } else {
-    const channel = publish.channel === "test" ? "测试包" : "签名发布";
+    const channel = publish.channel === "test" ? "测试包" : "稳定版";
     const identity = [publish.version ? `v${publish.version}` : "", publish.build !== undefined ? `build ${publish.build}` : ""].filter(Boolean).join(" · ");
-    publishStatus.textContent = `${channel}已就绪${identity ? ` · ${identity}` : ""} · 修订版 r${publish.revision ?? status.revision ?? "—"}`;
+    publishStatus.textContent = `最近${channel}已就绪${identity ? ` · ${identity}` : ""} · 修订版 r${publish.revision ?? status.revision ?? "—"}`;
   }
   if (!status?.artifacts) {
     const empty = document.createElement("span");
@@ -1610,6 +2037,18 @@ function renderArtifacts(status) {
 
 function renderStatus(status) {
   currentStatus = status || null;
+  const publishTarget = activePublishTarget();
+  if (publishTarget?.projectId === currentId && currentStatus) {
+    publishTarget.revision = currentStatus.revision;
+    publishTarget.builtRevision = currentStatus.builtRevision;
+    publishTarget.busy = Boolean(currentStatus.busy);
+    publishTarget.built = currentStatus.builtRevision === currentStatus.revision && !currentStatus.error;
+    if (publishTarget.kind === "root") {
+      publishTarget.version = $("config-version")?.value || publishTarget.version;
+      publishTarget.build = Number($("config-build")?.value ?? publishTarget.build);
+    }
+    renderPublishTargetPicker();
+  }
   setText("source-revision", `修订版 ${status?.revision ?? "—"}`);
   const state = $("build-state");
   if (!status) {
@@ -1637,9 +2076,10 @@ function renderStatus(status) {
   maybeRefreshPreview(status);
 }
 
-async function refreshStatus() {
-  if (!currentId) return null;
-  const status = await api(`/api/projects/${encodeURIComponent(currentId)}/status`);
+async function refreshStatus(projectId = currentId) {
+  if (!projectId) return null;
+  const status = await api(`/api/projects/${encodeURIComponent(projectId)}/status`);
+  if (currentId !== projectId) return null;
   renderStatus(status);
   return status;
 }
@@ -1656,7 +2096,7 @@ async function pollBuild(attempt = 0) {
   }
   const projectId = currentId;
   try {
-    const status = await refreshStatus();
+    const status = await refreshStatus(projectId);
     if (currentId !== projectId) return;
     if (status?.busy) {
       buildPollTimer = setTimeout(() => void pollBuild(attempt + 1), POLL_DELAY_MS);
@@ -1665,6 +2105,7 @@ async function pollBuild(attempt = 0) {
       if (status?.builtRevision === status?.revision && !status?.error) {
         void loadResources(projectId).catch(showNotice);
       }
+      void refreshPublishTargets();
     }
   } catch (error) {
     stopBuildPolling();
@@ -1672,20 +2113,31 @@ async function pollBuild(attempt = 0) {
   }
 }
 
-async function selectProject(id) {
+async function selectProject(id, options = {}) {
   if (currentId === id) return;
+  if (saving || publishing || startingBuild || currentStatus?.busy || publishTargetsLoading) {
+    showNotice("请先等待当前保存、构建、发布或目标刷新完成，再切换项目。", "info");
+    return;
+  }
   if (activeDeploy || startingDeploy) {
     showNotice("请先完成或取消当前部署，再切换项目。", "info");
     return;
   }
   if ((dirty || resourcesDirty) && currentId !== id && !window.confirm("放弃未保存的源文件或资源修改？")) return;
   clearNotice();
+  publishTargetContext = options.publishTargetContext || null;
   if (projectSwitcher) projectSwitcher.open = false;
   stopBuildPolling();
   stopDeployPolling();
   invalidateWechatRequests();
   const selectionGeneration = wechatGeneration;
   currentId = id;
+  const targetsProjectId = options.publishTargetContext?.sourceProjectId || id;
+  publishTargets = null;
+  publishTargetsLoading = true;
+  publishTargetsError = "";
+  const targetGeneration = ++publishTargetsGeneration;
+  renderPublishTargetPicker();
   versionSnapshot = null;
   versionsLoading = false;
   versionsGeneration += 1;
@@ -1707,20 +2159,27 @@ async function selectProject(id) {
   resourcesLoading = true;
   renderResourceState();
   try {
-    const [config, files, status, resources] = await Promise.all([
+    const [config, files, status, resources, targetResult] = await Promise.all([
       api(`/api/projects/${encodeURIComponent(id)}/config`),
       api(`/api/projects/${encodeURIComponent(id)}/files`),
       api(`/api/projects/${encodeURIComponent(id)}/status`),
       fetchResources(id),
+      api(`/api/projects/${encodeURIComponent(targetsProjectId)}/publish-targets?channel=${encodeURIComponent(publishTargetChannel)}`)
+        .then((payload) => ({ payload }))
+        .catch((error) => ({ error })),
     ]);
     if (currentId !== id || selectionGeneration !== wechatGeneration) return;
-    setText("project-title", config.name || id);
-    setText("project-subtitle", `${config.appId || "—"} · ${config.framework || "solid"} · ${config.entry || "app.tsx"}`);
+    updateProjectHeading(projects.find((project) => project.id === id), config);
     $("config-name").value = config.name || "";
     $("config-app-id").value = config.appId || "";
     $("config-version").value = config.version || "";
     $("config-build").value = config.build ?? 0;
     $("config-tick").value = config.tickHz ?? 60;
+    if (targetGeneration === publishTargetsGeneration) {
+      setPublishTargets(targetResult.payload, targetResult.error);
+      publishTargetsLoading = true;
+      updateActionStates();
+    }
     const fileList = files.files || files;
     renderFilePicker(fileList);
     await loadFile(projectFiles.includes(config.entry) ? config.entry : projectFiles.includes("app.tsx") ? "app.tsx" : projectFiles[0]);
@@ -1729,11 +2188,21 @@ async function selectProject(id) {
     setResourceInventory(resources);
     setEnabled(true);
     renderStatus(status);
+    if (targetGeneration === publishTargetsGeneration) {
+      publishTargetsLoading = false;
+      updateActionStates();
+    }
     if (status?.busy) buildPollTimer = setTimeout(() => void pollBuild(), POLL_DELAY_MS);
     await loadWechat(id, selectionGeneration);
     if (currentId !== id || selectionGeneration !== wechatGeneration) return;
     await resumeDeployment(id);
   } catch (error) {
+    if (targetGeneration === publishTargetsGeneration) {
+      publishTargetsLoading = false;
+      publishTargets = null;
+      publishTargetsError = String(error?.message || error);
+      renderPublishTargetPicker();
+    }
     resourcesLoading = false;
     resetResources();
     setEnabled(false);
@@ -1774,6 +2243,12 @@ async function loadProjects(preferred) {
   else {
     invalidateWechatRequests();
     currentId = null;
+    publishTargetContext = null;
+    publishTargets = null;
+    publishTargetsLoading = false;
+    publishTargetsError = "";
+    publishTargetsGeneration += 1;
+    renderPublishTargetPicker();
     versionSnapshot = null;
     versionsLoading = false;
     versionsGeneration += 1;
@@ -1809,11 +2284,12 @@ async function saveProject() {
       }),
     });
     setText("source-bytes", `${Number(source.bytes || 0).toLocaleString()} 字节`);
-    setText("project-title", config.name || currentId);
+    updateProjectHeading(projects.find((project) => project.id === currentId), config);
     markDirty(false);
     projects = (await api("/api/projects")) || projects;
     renderProjects();
     renderStatus(config.status);
+    void refreshPublishTargets();
   } catch (error) {
     setText("save-status", "保存失败");
     showNotice(error);
@@ -1826,42 +2302,70 @@ async function saveProject() {
 }
 
 async function buildProject() {
-  if (!currentId || currentStatus?.busy) return;
+  if (!currentId || currentStatus?.busy || startingBuild) return;
+  const projectId = currentId;
   clearNotice();
   try {
     if (dirty) await saveProject();
+    if (currentId !== projectId) return;
     if (resourcesDirty) {
       showNotice("构建前请先保存资源策略。", "info");
       return;
     }
-    const result = await api(`/api/projects/${encodeURIComponent(currentId)}/build`, { method: "POST", body: "{}" });
+    startingBuild = true;
+    updateActionStates();
+    const result = await api(`/api/projects/${encodeURIComponent(projectId)}/build`, { method: "POST", body: "{}" });
+    if (currentId !== projectId) return;
     renderStatus(result.status || result);
     stopBuildPolling();
     void pollBuild();
   } catch (error) {
-    showNotice(error);
+    if (currentId === projectId) showNotice(error);
+  } finally {
+    startingBuild = false;
+    updateActionStates();
   }
 }
 
-async function publishProject(channel = "release") {
+async function publishProject(channel = publishTargetChannel) {
   if (!currentId || publishing) return;
+  const selectedTarget = activePublishTarget();
+  if (selectedTarget?.kind === "reused") {
+    if (selectedTarget.canSelect === false || !selectedTarget.ownerProjectId) {
+      showNotice(selectedTarget.reason || `MiniApp ${selectedTarget.appId} 没有可用的所属项目。`, "error");
+      return;
+    }
+    const ownerProjectId = selectedTarget.ownerProjectId;
+    if (ownerProjectId !== currentId) {
+      showNotice(`请从发布目标中选择 MiniApp ${selectedTarget.title || selectedTarget.appId}，先打开其所属项目。`, "info");
+      return;
+    }
+  }
   const projectId = currentId;
   if (dirty) {
     showNotice("发布前请先保存源文件修改。", "info");
     return;
   }
-  if (!currentStatus || currentStatus.builtRevision !== currentStatus.revision || currentStatus.error) {
-    showNotice("发布前请先构建已保存的项目。", "info");
-    return;
-  }
   clearNotice();
   publishing = true;
+  setPublishEditorLocked(true);
   $("publish-status").textContent = channel === "test" ? "正在发布签名测试包…" : "正在发布签名版本…";
   updateActionStates();
   try {
+    const freshStatus = await api(`/api/projects/${encodeURIComponent(projectId)}/status`);
+    if (currentId !== projectId) return;
+    renderStatus(freshStatus);
+    if (dirty) {
+      showNotice("发布前请先保存源文件修改。", "info");
+      return;
+    }
+    if (!freshStatus || freshStatus.busy || freshStatus.builtRevision !== freshStatus.revision || freshStatus.error) {
+      showNotice("发布前请先构建已保存的项目。", "info");
+      return;
+    }
     const result = await api(`/api/projects/${encodeURIComponent(projectId)}/publish`, {
       method: "POST",
-      body: JSON.stringify(channel === "test" ? { channel: "test" } : {}),
+      body: JSON.stringify({ channel }),
     });
     if (currentId !== projectId) return;
     renderStatus(result.status || result);
@@ -1874,6 +2378,7 @@ async function publishProject(channel = "release") {
     if (!resourcesDirty) {
       void loadResources(projectId).catch(showNotice);
     }
+    void refreshPublishTargets();
     showNotice(`${channel === "test" ? "测试" : "稳定版"}资源包已发布。`, "success");
   } catch (error) {
     if (currentId === projectId) {
@@ -1882,6 +2387,7 @@ async function publishProject(channel = "release") {
     }
   } finally {
     publishing = false;
+    setPublishEditorLocked(false);
     updateActionStates();
   }
 }
@@ -2438,10 +2944,64 @@ $("create-form").addEventListener("submit", async (event) => {
 
 $("save").addEventListener("click", () => { void saveProject().catch(() => {}); });
 $("build").addEventListener("click", () => { void buildProject(); });
-$("publish").addEventListener("click", () => { void publishProject("release"); });
-$("publish-test").addEventListener("click", () => { void publishProject("test"); });
-$("version-publish-test")?.addEventListener("click", () => { void publishProject("test"); });
-$("version-publish-release")?.addEventListener("click", () => { void publishProject("release"); });
+$("publish-target-channel")?.addEventListener("change", (event) => {
+  void switchPublishTargetChannel(event.currentTarget.value).catch(showNotice);
+});
+$("publish-target-picker")?.addEventListener("change", (event) => {
+  const appId = event.currentTarget.value;
+  const target = publishTargets?.targets?.find((entry) => entry.appId === appId);
+  if (!target) {
+    const sourceProjectId = publishTargetContext?.sourceProjectId;
+    const sourceProject = projects.find((project) => project.id === sourceProjectId);
+    if (sourceProjectId && currentId !== sourceProjectId && (appId === sourceProjectId || appId === sourceProject?.appId)) {
+      void selectProject(sourceProjectId).then(() => {
+        if (currentId === sourceProjectId) showNotice(`已返回主应用 ${sourceProject?.name || sourceProject?.appId || sourceProjectId}。`, "info");
+        else renderPublishTargetPicker();
+      });
+      return;
+    }
+    renderPublishTargetPicker();
+    return;
+  }
+  if (target.kind !== "reused") {
+    const sourceProjectId = publishTargetContext?.sourceProjectId;
+    if (sourceProjectId && target.projectId === sourceProjectId && currentId !== sourceProjectId) {
+      void selectProject(sourceProjectId).then(() => {
+        if (currentId === sourceProjectId) showNotice(`已返回主应用项目 ${target.appId}。`, "info");
+        else renderPublishTargetPicker();
+      });
+      return;
+    }
+    renderPublishTargetPicker();
+    return;
+  }
+  if (target.canSelect === false || !target.ownerProjectId) {
+    showNotice(target.reason || `无法解析 ${target.appId} 的所属项目。`, "error");
+    renderPublishTargetPicker();
+    return;
+  }
+  const ownerProjectId = target.ownerProjectId;
+  const context = {
+    sourceProjectId: publishTargets?.currentProjectId || currentId,
+    sourceProjectTitle: target.sourceProjectTitle || projects.find((project) => project.id === publishTargets?.currentProjectId)?.name || publishTargets?.currentProjectId || currentId,
+    sourcePath: target.sourcePath || "",
+    appId: target.appId,
+    ownerProjectId,
+    ownerTitle: target.ownerTitle || target.title || ownerProjectId,
+  };
+  void selectProject(ownerProjectId, { publishTargetContext: context }).then(() => {
+    if (currentId !== ownerProjectId) {
+      renderPublishTargetPicker();
+      return;
+    }
+    const sourceLabel = target.sourcePath
+      ? `${context.sourceProjectTitle} 内 MiniApp ${target.title || target.appId}（${target.sourcePath}）`
+      : `MiniApp ${target.title || target.appId} 的源码 ${target.ownerTitle || ownerProjectId}`;
+    showNotice(`已打开 ${sourceLabel}。当前编辑、预览、构建和发布均针对该源码；可从项目列表返回主应用。`, "info");
+  });
+});
+$("publish-test").addEventListener("click", () => { void publishProject(publishTargetChannel); });
+$("open-version-manager-from-signing")?.addEventListener("click", () => $("versions-open")?.click());
 $("version-app-config-copy")?.addEventListener("click", () => {
   const button = $("version-app-config-copy");
   const url = $("version-app-config-link")?.getAttribute("href");

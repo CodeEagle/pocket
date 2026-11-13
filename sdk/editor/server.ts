@@ -22,7 +22,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -47,7 +47,7 @@ import { createWechatPreviewManager } from "./wechat.ts";
 import { createStudioDiagnostics, handleDiagnosticsRequest } from "./diagnostics.ts";
 import { createStudioUpgradeManager, readInstalledSdkInfo } from "../scripts/studio_upgrade.mjs";
 import { resolveProjectTemplate } from "../scripts/project_templates.ts";
-import { chooseUpdateHost, startUpdateEndpoint } from "./update_endpoint.ts";
+import { chooseUpdateHost, isLocalNetworkAddress, startUpdateEndpoint } from "./update_endpoint.ts";
 import {
   currentVersion,
   emptyVersionHistory,
@@ -58,6 +58,7 @@ import {
   writeVersionHistoryAtomic,
   type PublishedVersion,
   type PublishedVersionPackage,
+  type PublishedVersionReusedPackage,
   type VersionHistory,
   type VersionSlot,
 } from "./version_store.ts";
@@ -66,6 +67,7 @@ import {
   buildResourceSnapshot,
   copyBuiltNativeModels,
   emptyResourceInventory,
+  loadValidatedResourceCatalog,
   readResourcePolicy,
   readResourceSnapshot,
   resourceArtifactDirectory,
@@ -150,6 +152,7 @@ export type EditorStatus = {
       version: string;
       build: number;
     }>;
+    reusedPackages?: PublishedVersionReusedPackage[];
   };
 };
 
@@ -203,6 +206,8 @@ type EditorState = {
   finishedAt?: string;
   artifacts?: ArtifactInfo;
   publish?: EditorStatus["publish"];
+  /** Stable identity of a root-catalog source registered as this project. */
+  sourceProjectIdentity?: string;
   novelBackup?: { intervalMinutes: number; lastRunAt?: string; lastBackupId?: string; error?: string };
   novelRestoreEpoch?: number;
 };
@@ -216,7 +221,20 @@ type Workspace = {
   states: string;
   projectRoot?: string;
   projectId?: string;
+  projectSources?: Map<string, CatalogProjectSource>;
 };
+
+type CatalogProjectSource = {
+  root: string;
+  appId: string;
+  identity: string;
+  parentProjectId?: string;
+  sourceProjectTitle?: string;
+  sourcePath?: string;
+};
+
+type CatalogProjectProvenance = Pick<CatalogProjectSource,
+  "parentProjectId" | "sourceProjectTitle" | "sourcePath"> & { kind: "catalog-miniapp" };
 
 type EditorServer = ReturnType<typeof Bun.serve>;
 
@@ -881,6 +899,63 @@ async function loadConfig(projectDir: string, id: string): Promise<EditorConfig>
   });
 }
 
+async function loadCatalogProjectSources(
+  projectRoot: string,
+  rootProjectId: string,
+  existingProjectsDirectory: string,
+): Promise<Map<string, CatalogProjectSource>> {
+  if (!existsSync(join(projectRoot, "pocket.system.json"))) return new Map();
+  const systemPath = safeProjectFile(projectRoot, "pocket.system.json", { allowConfig: true });
+  const catalog = await loadValidatedResourceCatalog(projectRoot, systemPath);
+  const rootConfig = await loadConfig(projectRoot, rootProjectId);
+  const sources = new Map<string, CatalogProjectSource>();
+  const ambiguous = new Set<string>();
+  const canonicalProjectRoot = realpathSync(projectRoot);
+  for (const entry of catalog) {
+    if (entry.package === rootConfig.appId || !rootConfig.reusePublishedPackages?.includes(entry.package)) continue;
+    const packageRoot = dirname(entry.path);
+    let editor: Record<string, unknown> = {};
+    try {
+      editor = await readJsonFile<Record<string, unknown>>(safeProjectFile(packageRoot, "editor.json", { allowConfig: true }), {});
+    } catch {
+      // Catalog packages normally have only pocket.json until first edited.
+    }
+    const candidateName = typeof editor.id === "string"
+      ? editor.id
+      : typeof entry.manifest.name === "string"
+        ? entry.manifest.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
+        : "";
+    if (!projectIdPattern.test(candidateName) || candidateName === rootProjectId || ambiguous.has(candidateName)) continue;
+    // A normal workspace project remains the canonical editable owner when it
+    // already exists. Catalog mapping only restores a missing external source.
+    if (existsSync(safeChild(existingProjectsDirectory, candidateName))) continue;
+    const config = await loadConfig(packageRoot, candidateName);
+    if (config.appId !== entry.package) continue;
+    const canonicalPackageRoot = realpathSync(packageRoot);
+    const relativeSourcePath = relative(canonicalProjectRoot, canonicalPackageRoot);
+    const isNestedSource = Boolean(relativeSourcePath && relativeSourcePath !== "." && relativeSourcePath !== ".." &&
+      !relativeSourcePath.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(relativeSourcePath));
+    const source = {
+      root: canonicalPackageRoot,
+      appId: entry.package,
+      identity: `${canonicalPackageRoot}\n${entry.package}`,
+      ...(isNestedSource ? {
+        parentProjectId: rootProjectId,
+        sourceProjectTitle: rootConfig.title || rootConfig.name || rootProjectId,
+        sourcePath: relativeSourcePath.split(/[\\/]+/u).join("/"),
+      } : {}),
+    };
+    const previous = sources.get(candidateName);
+    if (previous && (previous.root !== source.root || previous.appId !== source.appId)) {
+      sources.delete(candidateName);
+      ambiguous.add(candidateName);
+      continue;
+    }
+    sources.set(candidateName, source);
+  }
+  return sources;
+}
+
 async function writeConfig(projectDir: string, config: EditorConfig): Promise<void> {
   // Validate both destinations before mutating either one. A malformed
   // external project must not get a partial config update when its second
@@ -918,20 +993,61 @@ async function createProject(workspace: Workspace, id: string, input: Record<str
 
 function projectDirectory(workspace: Workspace, id: string): string {
   if (workspace.projectRoot && id === workspace.projectId) return workspace.projectRoot;
+  const source = workspace.projectSources?.get(id);
+  if (source) return source.root;
   return safeChild(workspace.projects, id);
 }
 
-async function listProjects(workspace: Workspace): Promise<Array<EditorConfig & { status: EditorStatus }>> {
-  await mkdir(workspace.projects, { recursive: true });
-  const entries = await readdir(workspace.projects, { withFileTypes: true });
-  const projects: Array<EditorConfig & { status: EditorStatus }> = [];
+async function workspaceProjectIds(workspace: Workspace): Promise<string[]> {
+  let entries: Array<import("node:fs").Dirent> = [];
+  try {
+    entries = await readdir(workspace.projects, { withFileTypes: true });
+  } catch {
+    // The configured project and catalog roots may still be available.
+  }
   const ids = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
-  if (workspace.projectRoot && !ids.includes(workspace.projectId!)) ids.push(workspace.projectId!);
-  for (const id of ids) {
+  if (workspace.projectRoot && workspace.projectId) ids.push(workspace.projectId);
+  for (const id of workspace.projectSources?.keys() ?? []) ids.push(id);
+  return [...new Set(ids)].sort((left, right) => left.localeCompare(right));
+}
+
+async function bindCatalogProjectState(workspace: Workspace, id: string, state: EditorState): Promise<EditorState> {
+  const source = workspace.projectSources?.get(id);
+  if (!source || state.sourceProjectIdentity === source.identity) return state;
+  // A restored catalog source must not inherit a build made from a
+  // missing/older source directory. Persist the binding and invalidate that
+  // old build exactly once; keep the immutable publish mirror visible until a
+  // fresh build/publish replaces it.
+  if (state.sourceProjectIdentity !== undefined || state.builtRevision !== null || state.artifacts || state.publish) {
+    state.revision += 1;
+    state.error = undefined;
+  }
+  state.sourceProjectIdentity = source.identity;
+  await saveState(workspace, id, state);
+  return state;
+}
+
+async function listProjects(workspace: Workspace, getState: (id: string) => Promise<EditorState>): Promise<Array<EditorConfig & { status: EditorStatus; source?: CatalogProjectProvenance }>> {
+  await mkdir(workspace.projects, { recursive: true });
+  const projects: Array<EditorConfig & { status: EditorStatus; source?: CatalogProjectProvenance }> = [];
+  for (const id of await workspaceProjectIds(workspace)) {
     try {
       const config = await loadConfig(projectDirectory(workspace, id), id);
-      const state = await loadState(workspace, id);
-      projects.push({ ...config, status: publicStatus(id, state) });
+      const state = await getState(id);
+      const source = workspace.projectSources?.get(id);
+      const provenance = source?.parentProjectId && source.sourceProjectTitle && source.sourcePath
+        ? {
+          kind: "catalog-miniapp" as const,
+          parentProjectId: source.parentProjectId,
+          sourceProjectTitle: source.sourceProjectTitle,
+          sourcePath: source.sourcePath,
+        }
+        : undefined;
+      projects.push({
+        ...config,
+        status: publicStatus(id, state),
+        ...(provenance ? { source: provenance } : {}),
+      });
     } catch {
       // A partially copied project is not allowed to take down the editor.
     }
@@ -1329,6 +1445,27 @@ async function publishProject(
       reuseIds.length !== reusedPackages.length || reuseIds.some((packageId) => !reusedPackages.some((pkg) => pkg.id === packageId))) {
     throw new Error("reused package descriptors do not match reusePublishedPackages");
   }
+  const reusedPackageRecords: PublishedVersionReusedPackage[] = reusedPackages.map((pkg) => {
+    if (typeof pkg.id !== "string" || typeof pkg.version !== "string" || !Number.isSafeInteger(pkg.build) ||
+        typeof pkg.reusedProjectId !== "string" || typeof pkg.reusedReleaseId !== "string") {
+      throw new Error("reused package descriptor is missing its immutable owner reference");
+    }
+    return {
+      id: pkg.id,
+      version: pkg.version,
+      build: Number(pkg.build),
+      ownerProjectId: pkg.reusedProjectId,
+      releaseId: pkg.reusedReleaseId,
+    };
+  });
+  const sameReusedPackages = (left: PublishedVersionReusedPackage[] | undefined, right: PublishedVersionReusedPackage[]) => {
+    const previous = left ?? [];
+    return previous.length === right.length && previous.every((pkg, index) => {
+      const next = right[index];
+      return !!next && pkg.id === next.id && pkg.version === next.version && pkg.build === next.build &&
+        pkg.ownerProjectId === next.ownerProjectId && pkg.releaseId === next.releaseId;
+    });
+  };
   const packageVersion = slot;
   // A fixed package index follows the newest host/slot release across every
   // compatibility branch. Keep anti-rollback floors equally broad; otherwise
@@ -1723,7 +1860,8 @@ async function publishProject(
           throw new Error(`stable release build ${config.build} already exists with different package contents`);
         }
       }
-      let stableEquivalent = config.build === previousEntry.build && packageRecords.length === previousEntry.packages.length;
+      let stableEquivalent = config.build === previousEntry.build && packageRecords.length === previousEntry.packages.length &&
+        sameReusedPackages(previousEntry.reusedPackages, reusedPackageRecords);
       for (const previousPackage of previousEntry.packages) {
         const nextPackage = packageRecords.find((pkg) => pkg.id === previousPackage.id);
         if (!nextPackage) {
@@ -1768,6 +1906,7 @@ async function publishProject(
           publishedAt: previousEntry.publishedAt,
           ...(parsedOrigin.hostname === "127.0.0.1" ? {} : { lanOrigin: safeOrigin }),
           ...(publishedPackages.length > 0 ? { packages: publishedPackages } : {}),
+          ...(reusedPackageRecords.length > 0 ? { reusedPackages: reusedPackageRecords } : {}),
         };
         await saveState(workspace, id, state);
         return resultFromPublishedDirectory(safeChild(workspace.updates, oldRoot.artifactRoot));
@@ -1799,6 +1938,7 @@ async function publishProject(
       payloadSha256: sha256Hex(result.payloadBytes),
       archivePath: relative(workspace.updates, archivePath).replaceAll("\\", "/"),
       packages: packageRecords,
+      ...(reusedPackageRecords.length > 0 ? { reusedPackages: reusedPackageRecords } : {}),
     };
     const nextHistory: VersionHistory = {
       schemaVersion: 1,
@@ -1836,6 +1976,7 @@ async function publishProject(
       publishedAt: entry.publishedAt,
       ...(parsedOrigin.hostname === "127.0.0.1" ? {} : { lanOrigin: safeOrigin }),
       ...(publishedPackages.length > 0 ? { packages: publishedPackages } : {}),
+      ...(reusedPackageRecords.length > 0 ? { reusedPackages: reusedPackageRecords } : {}),
     };
     try {
       await saveState(workspace, id, state);
@@ -1890,8 +2031,16 @@ function contentType(path: string): string {
   }
 }
 
-function validateRequestSecurity(req: Request, url: URL, serverPort: number, csrfToken: string): Response | null {
+function validateRequestSecurity(req: Request, url: URL, serverPort: number, csrfToken: string, bindHost: string): Response | null {
   const allowedHostnames = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+  if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(bindHost)) {
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries ?? []) {
+        if (entry.internal) continue;
+        allowedHostnames.add(entry.family === "IPv6" ? `[${entry.address}]` : entry.address);
+      }
+    }
+  }
 
   const hostHeader = req.headers.get("host");
   if (!hostHeader) {
@@ -1939,7 +2088,7 @@ function validateRequestSecurity(req: Request, url: URL, serverPort: number, csr
       const originPort = originUrl.port || "80";
       if (
         originUrl.protocol !== url.protocol ||
-        !allowedHostnames.has(originUrl.hostname) ||
+        originUrl.origin !== dummyUrl.origin ||
         originPort !== String(serverPort)
       ) {
         return failure("forbidden: cross-origin requests not allowed", 403);
@@ -1957,7 +2106,7 @@ function validateRequestSecurity(req: Request, url: URL, serverPort: number, csr
       const refererPort = refererUrl.port || "80";
       if (
         refererUrl.protocol !== url.protocol ||
-        !allowedHostnames.has(refererUrl.hostname) ||
+        refererUrl.origin !== dummyUrl.origin ||
         refererPort !== String(serverPort)
       ) {
         return failure("forbidden: cross-origin referer not allowed", 403);
@@ -2024,6 +2173,14 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     states: join(workspaceRoot, "states"),
     ...(projectRoot ? { projectRoot, projectId } : {}),
   };
+  workspace.projectSources = new Map();
+  if (projectRoot && projectId) {
+    try {
+      workspace.projectSources = await loadCatalogProjectSources(projectRoot, projectId, workspace.projects);
+    } catch (error) {
+      console.warn(`Editor catalog-backed projects are unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const flutterRoot = options.flutterRoot ?? process.env.POCKET_EDITOR_FLUTTER_ROOT;
   if (flutterRoot && !workspace.projectRoot) throw new Error("a Flutter consumer must be bound to an explicit JS project root");
   const explicitHostVersion = options.updateHostVersion ?? process.env.POCKET_EDITOR_HOST_VERSION;
@@ -2049,7 +2206,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     if (cached) return cached;
     let loading = stateLoads.get(id);
     if (!loading) {
-      loading = loadState(workspace, id).then((state) => {
+      loading = loadState(workspace, id).then(async (loaded) => {
+        const state = await bindCatalogProjectState(workspace, id, loaded);
         states.set(id, state);
         armNovelBackup(id, state);
         return state;
@@ -2332,16 +2490,228 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       reusedProjectId: owner.projectId,
     };
   };
-  const findLegacyPublishedOwner = async (host: string, packageId: string, slot: VersionSlot, exceptProjectId: string): Promise<string | undefined> => {
-    let entries: Array<import("node:fs").Dirent> = [];
-    try {
-      entries = await readdir(workspace.projects, { withFileTypes: true });
-    } catch {
-      return undefined;
+  const projectPublishTargets = async (id: string, config: EditorConfig, state: EditorState, channel: "test" | "release") => {
+    const slot = versionSlot(channel);
+    const history = await readVersionHistory(versionHistoryPath(workspace.states, id));
+    const publishedRootEntry = history.entries.find((entry) => entry.hostVersion === updateHostVersion && entry.slot === slot && entry.channel === channel);
+    const rootBuilt = state.builtRevision !== null && state.builtRevision === state.revision && !!state.artifacts && !state.error;
+    const targets: Array<Record<string, unknown>> = [{
+      projectId: id,
+      appId: config.appId,
+      title: config.name || config.appId,
+      kind: "root" as const,
+      version: config.version,
+      build: config.build,
+      revision: state.revision,
+      builtRevision: state.builtRevision,
+      built: rootBuilt,
+      busy: state.busy,
+      canSelect: true,
+      ...(publishedRootEntry ? {
+        publishedVersion: publishedRootEntry.version,
+        publishedBuild: publishedRootEntry.build,
+        publishedReleaseId: publishedRootEntry.releaseId,
+      } : {}),
+      canPublish: rootBuilt && !state.busy,
+      ...(!rootBuilt ? { reason: state.error ? `The current build failed: ${state.error}` : "Build the current project before publishing." } : state.busy ? { reason: "The current project is busy." } : {}),
+    }];
+    let allReuseOwnersResolved = true;
+    for (const packageId of config.reusePublishedPackages ?? []) {
+      const catalogSource = [...(workspace.projectSources?.entries() ?? [])]
+        .find(([sourceProjectId, source]) => sourceProjectId !== id && source.parentProjectId === id && source.appId === packageId &&
+          Boolean(source.sourceProjectTitle && source.sourcePath))?.[1];
+      const sourceDetails = catalogSource?.sourceProjectTitle && catalogSource.sourcePath ? {
+        sourceProjectId: catalogSource.parentProjectId,
+        sourceProjectTitle: catalogSource.sourceProjectTitle,
+        sourcePath: catalogSource.sourcePath,
+      } : {};
+      const owners: Array<{ projectId: string; entry: PublishedVersion; package: PublishedVersionPackage }> = [];
+      let files: Array<import("node:fs").Dirent> = [];
+      try {
+        files = await readdir(workspace.states, { withFileTypes: true });
+      } catch {
+        // No journal directory means the package has no signed owner yet.
+      }
+      for (const file of files) {
+        if (!file.isFile() || !file.name.endsWith(".versions.json")) continue;
+        const ownerProjectId = file.name.slice(0, -".versions.json".length);
+        if (!projectIdPattern.test(ownerProjectId)) continue;
+        let ownerHistory: VersionHistory;
+        try {
+          ownerHistory = await readVersionHistory(join(workspace.states, file.name));
+        } catch {
+          continue;
+        }
+        const ownerEntry = ownerHistory.entries.find((entry) => entry.hostVersion === updateHostVersion && entry.slot === slot &&
+          entry.channel === channel && entry.packages.some((pkg) => pkg.id === packageId));
+        const pkg = ownerEntry?.packages.find((candidate) => candidate.id === packageId);
+        if (ownerEntry && pkg) owners.push({ projectId: ownerProjectId, entry: ownerEntry, package: pkg });
+      }
+      const ownerProjectIds = [...new Set(owners.map((owner) => owner.projectId))];
+      if (ownerProjectIds.length === 0) {
+        allReuseOwnersResolved = false;
+        const sourceCandidates: Array<{ projectId: string; config: EditorConfig; state: EditorState }> = [];
+        for (const candidateId of await workspaceProjectIds(workspace)) {
+          if (!existsSync(projectDirectory(workspace, candidateId))) continue;
+          try {
+            const candidateConfig = await loadConfig(projectDirectory(workspace, candidateId), candidateId);
+            if (candidateConfig.appId !== packageId) continue;
+            sourceCandidates.push({ projectId: candidateId, config: candidateConfig, state: await getState(candidateId) });
+          } catch {
+            // A malformed unrelated source cannot become an owner target.
+          }
+        }
+        const uniqueSources = [...new Map(sourceCandidates.map((candidate) => [candidate.projectId, candidate])).values()];
+        if (uniqueSources.length === 1 && uniqueSources[0]!.projectId !== id) {
+          const candidate = uniqueSources[0]!;
+          const candidateBuilt = candidate.state.builtRevision !== null && candidate.state.builtRevision === candidate.state.revision &&
+            !!candidate.state.artifacts && !candidate.state.error;
+          targets.push({
+            projectId: candidate.projectId,
+            appId: packageId,
+            title: candidate.config.title || packageId,
+            kind: "reused" as const,
+            ...sourceDetails,
+            ownerProjectId: candidate.projectId,
+            ownerTitle: candidate.config.name || candidate.projectId,
+            version: candidate.config.version,
+            build: candidate.config.build,
+            revision: candidate.state.revision,
+            builtRevision: candidate.state.builtRevision,
+            built: candidateBuilt,
+            busy: candidate.state.busy,
+            canSelect: true,
+            canPublish: candidateBuilt && !candidate.state.busy,
+            ...(!candidateBuilt ? { reason: candidate.state.error ? `The owner build failed: ${candidate.state.error}` : "Build the owner project before publishing this MiniApp." } : candidate.state.busy ? { reason: "The owner project is busy." } : {}),
+          });
+          continue;
+        }
+        const reason = uniqueSources.length > 1
+          ? `More than one editable project contains ${packageId}; choose or resolve its owner first.`
+          : `No ${channel} package owner or unique editable source is available for ${packageId}.`;
+        targets.push({
+          projectId: "",
+          appId: packageId,
+          title: packageId,
+          kind: "reused" as const,
+          ...sourceDetails,
+          version: "",
+          build: 0,
+          revision: 0,
+          builtRevision: null,
+          built: false,
+          busy: false,
+          canSelect: false,
+          canPublish: false,
+          reason,
+        });
+        continue;
+      }
+      if (ownerProjectIds.length > 1) {
+        allReuseOwnersResolved = false;
+        targets.push({
+          projectId: "",
+          appId: packageId,
+          title: packageId,
+          kind: "reused" as const,
+          ...sourceDetails,
+          version: "",
+          build: 0,
+          revision: 0,
+          builtRevision: null,
+          built: false,
+          busy: false,
+          canSelect: false,
+          canPublish: false,
+          reason: `More than one ${channel} project owns ${packageId}; resolve the package owner before publishing.`,
+        });
+        continue;
+      }
+      const ownerProjectId = ownerProjectIds[0]!;
+      const owner = owners.find((candidate) => candidate.projectId === ownerProjectId)!;
+      if (ownerProjectId === id || !existsSync(projectDirectory(workspace, ownerProjectId))) {
+        if (ownerProjectId === id) allReuseOwnersResolved = false;
+        targets.push({
+          projectId: ownerProjectId,
+          appId: packageId,
+          title: packageId,
+          kind: "reused" as const,
+          ...sourceDetails,
+          ownerProjectId,
+          ownerTitle: ownerProjectId,
+          version: owner.entry.version,
+          build: owner.entry.build,
+          revision: 0,
+          builtRevision: null,
+          built: false,
+          busy: false,
+          canSelect: false,
+          publishedVersion: owner.package.version,
+          publishedBuild: owner.package.build,
+          publishedReleaseId: owner.entry.releaseId,
+          canPublish: false,
+          reason: ownerProjectId === id ? "The reused package is owned by this project." : "The published owner project is missing.",
+        });
+        continue;
+      }
+      try {
+        const ownerConfig = await loadConfig(projectDirectory(workspace, ownerProjectId), ownerProjectId);
+        const ownerState = await getState(ownerProjectId);
+        const ownerBuilt = ownerState.builtRevision !== null && ownerState.builtRevision === ownerState.revision && !!ownerState.artifacts && !ownerState.error;
+        const title = packageId === ownerConfig.appId ? ownerConfig.title : packageId;
+        targets.push({
+          projectId: ownerProjectId,
+          appId: packageId,
+          title,
+          kind: "reused" as const,
+          ...sourceDetails,
+          ownerProjectId,
+          ownerTitle: ownerConfig.name || ownerProjectId,
+          version: ownerConfig.version,
+          build: ownerConfig.build,
+          revision: ownerState.revision,
+          builtRevision: ownerState.builtRevision,
+          built: ownerBuilt,
+          busy: ownerState.busy,
+          canSelect: true,
+          publishedVersion: owner.package.version,
+          publishedBuild: owner.package.build,
+          publishedReleaseId: owner.entry.releaseId,
+          canPublish: ownerBuilt && !ownerState.busy,
+          ...(!ownerBuilt ? { reason: ownerState.error ? `The owner build failed: ${ownerState.error}` : "Build the owner project before publishing this MiniApp." } : ownerState.busy ? { reason: "The owner project is busy." } : {}),
+        });
+      } catch {
+        targets.push({
+          projectId: ownerProjectId,
+          appId: packageId,
+          title: packageId,
+          kind: "reused" as const,
+          ...sourceDetails,
+          ownerProjectId,
+          ownerTitle: ownerProjectId,
+          version: owner.entry.version,
+          build: owner.entry.build,
+          revision: 0,
+          builtRevision: null,
+          built: false,
+          busy: false,
+          canSelect: false,
+          publishedVersion: owner.package.version,
+          publishedBuild: owner.package.build,
+          publishedReleaseId: owner.entry.releaseId,
+          canPublish: false,
+          reason: "The published owner project configuration is unavailable.",
+        });
+      }
     }
-    const ids = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
-    if (workspace.projectRoot && workspace.projectId && !ids.includes(workspace.projectId)) ids.push(workspace.projectId);
-    for (const projectId of ids) {
+    if (targets[0]?.canPublish === true && !allReuseOwnersResolved) {
+      targets[0].canPublish = false;
+      targets[0].reason = "Cannot publish while a reused package has no unique owner for this channel.";
+    }
+    return { currentProjectId: id, channel, targets };
+  };
+  const findLegacyPublishedOwner = async (host: string, packageId: string, slot: VersionSlot, exceptProjectId: string): Promise<string | undefined> => {
+    for (const projectId of await workspaceProjectIds(workspace)) {
       if (projectId === exceptProjectId) continue;
       try {
         const projectConfig = await loadConfig(projectDirectory(workspace, projectId), projectId);
@@ -2444,15 +2814,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     return new Response(bytes, { headers: { "content-type": contentType(file), "cache-control": "no-store" } });
   };
   const findLegacyArtifact = async (host: string, packageId: string, slot: VersionSlot, artifactPath: string, routeVersion?: string): Promise<string | undefined> => {
-    let entries: Array<import("node:fs").Dirent> = [];
-    try {
-      entries = await readdir(workspace.projects, { withFileTypes: true });
-    } catch {
-      entries = [];
-    }
-    const projectIds = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
-    if (workspace.projectRoot && workspace.projectId && !projectIds.includes(workspace.projectId)) projectIds.push(workspace.projectId);
-    for (const projectId of projectIds) {
+    for (const projectId of await workspaceProjectIds(workspace)) {
       try {
         const projectConfig = await loadConfig(projectDirectory(workspace, projectId), projectId);
         const projectState = await loadState(workspace, projectId);
@@ -2512,15 +2874,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     return undefined;
   };
   const readLegacyAggregate = async (host: string, rootPackageId: string, routeVersion: string, requestedCompatVersion = routeVersion, revisionOverride?: number, projectIdFilter?: string): Promise<Response | undefined> => {
-    let entries: Array<import("node:fs").Dirent> = [];
-    try {
-      entries = await readdir(workspace.projects, { withFileTypes: true });
-    } catch {
-      entries = [];
-    }
-    const projectIds = entries.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
-    if (workspace.projectRoot && workspace.projectId && !projectIds.includes(workspace.projectId)) projectIds.push(workspace.projectId);
-    for (const projectId of projectIds) {
+    for (const projectId of await workspaceProjectIds(workspace)) {
       if (projectIdFilter && projectId !== projectIdFilter) continue;
       let projectConfig: EditorConfig;
       let projectState: EditorState;
@@ -2982,15 +3336,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     // Pre-journal workspaces still have a mutable slot directory. Return a
     // derived index so a fixed App URL remains usable after an Editor restart;
     // nothing is written and no second catalog is persisted.
-    let projects: Array<import("node:fs").Dirent> = [];
-    try {
-      projects = await readdir(workspace.projects, { withFileTypes: true });
-    } catch {
-      projects = [];
-    }
-    const projectIds = projects.filter((entry) => entry.isDirectory() && projectIdPattern.test(entry.name)).map((entry) => entry.name);
-    if (workspace.projectRoot && workspace.projectId && !projectIds.includes(workspace.projectId)) projectIds.push(workspace.projectId);
-    for (const projectId of projectIds) {
+    for (const projectId of await workspaceProjectIds(workspace)) {
       let config: EditorConfig;
       let state: EditorState;
       try {
@@ -3216,6 +3562,13 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     if (!deviceUpdates) {
       const hostname = options.updateHost ?? (process.env.POCKET_EDITOR_UPDATE_HOST || chooseUpdateHost());
       const port = options.updatePort ?? Number(process.env.POCKET_EDITOR_UPDATE_PORT || server.port);
+      // The LAN Editor already serves published packages. Do not bind a
+      // second server to an address/port covered by its wildcard listener.
+      const localAddress = hostname === "127.0.0.1" || Object.values(networkInterfaces())
+        .some(entries => entries?.some(entry => entry.family === "IPv4" && entry.address === hostname));
+      if (port === server.port && (server.hostname === hostname || (server.hostname === "0.0.0.0" && localAddress))) {
+        return `http://${hostname}:${server.port}`;
+      }
       deviceUpdates = startUpdateEndpoint({ hostname, port, read: (path, servingOrigin) => readPublishedResponse(path, servingOrigin) });
       console.log(`Pocket version backend listening at ${deviceUpdates.origin} (signed published packages only)`);
     }
@@ -3272,6 +3625,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           hostConfigUrl: `${origin}${route}/host.json`,
         };
       }),
+      reusedPackages: (entry.reusedPackages ?? []).map((pkg) => ({ ...pkg })),
     }));
     const slots = [] as Array<{
       name: "test" | "stable";
@@ -3280,6 +3634,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
       releaseId?: string | null;
       archiveUrl?: string;
       packages: Array<{ id: string; version: string; build: number; manifestUrl: string; hostConfigUrl: string }>;
+      reusedPackages?: PublishedVersionReusedPackage[];
     }>;
     for (const name of ["test", "stable"] as const) {
       const packages = [] as Array<{ id: string; version: string; build: number; manifestUrl: string; hostConfigUrl: string }>;
@@ -3299,7 +3654,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
             hostConfigUrl: `${origin}${route}/host.json`,
           });
         }
-        slots.push({ name, version: current.version, build: current.build, releaseId: current.releaseId, archiveUrl: `/releases/${id}/${current.releaseId}.tar.gz`, packages });
+        slots.push({ name, version: current.version, build: current.build, releaseId: current.releaseId, archiveUrl: `/releases/${id}/${current.releaseId}.tar.gz`, packages,
+          ...(current.reusedPackages?.length ? { reusedPackages: current.reusedPackages.map((pkg) => ({ ...pkg })) } : {}) });
         continue;
       }
       const physicalHosts = new Set<string>([updateHostVersion, "editor"]);
@@ -3575,8 +3931,10 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
     idleTimeout: 120,
     maxRequestBodySize: maxAssetBytes,
     async fetch(request): Promise<Response> {
+      const peer = server.requestIP(request);
+      if (!peer || !isLocalNetworkAddress(peer.address)) return failure("forbidden: local network access only", 403);
       const url = new URL(request.url);
-      const securityError = validateRequestSecurity(request, url, server.port, csrfToken);
+      const securityError = validateRequestSecurity(request, url, server.port, csrfToken, server.hostname);
       if (securityError) return securityError;
       const path = url.pathname;
       const method = request.method.toUpperCase();
@@ -3679,11 +4037,13 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
           }
           return new Response(await readFile(archive), { headers: { "content-type": "application/gzip", "content-disposition": `attachment; filename="${match[1]}.tar.gz"` } });
         }
-        if (path === "/api/projects" && method === "GET") return json(await listProjects(workspace));
+        if (path === "/api/projects" && method === "GET") return json(await listProjects(workspace, getState));
         if (path === "/api/projects" && method === "POST") {
           const body = await parseJsonBody(request);
           const id = asProjectId(body.id);
-          if (workspace.projectRoot && id === workspace.projectId) return failure("configured project already exists; edit it instead of creating it", 409);
+          if ((workspace.projectRoot && id === workspace.projectId) || workspace.projectSources?.has(id)) {
+            return failure("configured project already exists; edit it instead of creating it", 409);
+          }
           const config = await createProject(workspace, id, body);
           const state: EditorState = { revision: 1, builtRevision: null, busy: false, logs: [`created from SDK starter at ${now()}`] };
           states.set(id, state);
@@ -3714,6 +4074,12 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         if (wechat.isBuilding(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("WeChat build is using this project; stop it before editing/building", 409);
         if (deploymentWriting(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("Device build is using this project; wait or cancel it before editing/building", 409);
         if (parts[0] === "api" && parts[1] === "projects") {
+          if (parts[3] === "publish-targets" && parts.length === 4 && method === "GET") {
+            const requestedChannel = new URL(request.url).searchParams.get("channel") ?? "test";
+            if (requestedChannel !== "test" && requestedChannel !== "release") return failure("publish target channel must be test or release", 400);
+            const config = await loadConfig(projectDir(id), id);
+            return json(await projectPublishTargets(id, config, state, requestedChannel));
+          }
           if (parts[3] === "novel") {
             if (state.busy && ["PUT", "POST"].includes(method)) return failure("Build in progress; retry editing when the build completes", 409);
             if (parts[4] === "backups" && parts[5] === "schedule" && parts.length === 6) {
@@ -3807,6 +4173,14 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               if (body.name !== undefined && body.title === undefined) merged.title = body.name;
               const config = validateConfig(id, merged);
               await writeConfig(projectDir(id), config);
+              if (workspace.projectRoot && id === workspace.projectId) {
+                try {
+                  workspace.projectSources = await loadCatalogProjectSources(workspace.projectRoot, id, workspace.projects);
+                } catch (error) {
+                  workspace.projectSources = new Map();
+                  console.warn(`Editor catalog-backed projects are unavailable: ${error instanceof Error ? error.message : String(error)}`);
+                }
+              }
               state.revision += 1;
               state.error = undefined;
               state.publish = undefined;
@@ -4060,6 +4434,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               updateUrl: state.publish?.updateUrl,
               archiveUrl: `/releases/${id}.tar.gz`,
               ...(state.publish?.packages ? { packages: state.publish.packages } : {}),
+              ...(state.publish?.reusedPackages ? { reusedPackages: state.publish.reusedPackages } : {}),
             });
           }
           if (parts[3] === "artifacts" && method === "GET") {

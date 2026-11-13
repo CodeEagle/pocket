@@ -17,6 +17,14 @@ export type PublishedVersionPackage = {
   artifactRoot: string;
 };
 
+export type PublishedVersionReusedPackage = {
+  id: string;
+  version: string;
+  build: number;
+  ownerProjectId: string;
+  releaseId: string;
+};
+
 export type PublishedVersion = {
   id: string;
   /** Alias kept explicit for clients that call the value a release id. */
@@ -38,6 +46,8 @@ export type PublishedVersion = {
   payloadSha256: string;
   archivePath: string;
   packages: PublishedVersionPackage[];
+  /** Immutable child package references published by a separate owner. */
+  reusedPackages?: PublishedVersionReusedPackage[];
 };
 
 export type VersionHistory = {

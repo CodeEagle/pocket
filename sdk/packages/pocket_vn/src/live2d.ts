@@ -1,12 +1,12 @@
 import {
   applyCubismExpression3, createPocketLive2dClient, evaluateCubismMotion3,
-  parseCubismExpression3, parseCubismModel3, parseCubismMotion3,
+  createCubismInteractionController, parseCubismExpression3, parseCubismModel3, parseCubismMotion3,
   type CubismMotion3, type CubismMotionFrame, type PocketLive2dHost,
 } from "@pocket/live2d";
 import { createCubismPhysics3Simulation } from "@pocket/live2d/physics";
 import { CubismPose3Simulation } from "@pocket/live2d/pose";
 import type { CharacterModelIntent } from "./types.ts";
-import type { NovelModelFactory, NovelModelMesh, NovelModelInstance } from "./models.ts";
+import type { NovelModelFactory, NovelModelMesh, NovelModelInstance, NovelModelPoint } from "./models.ts";
 
 export interface NovelLive2dSource {
   document: unknown;
@@ -47,9 +47,24 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
     const slash = nativeSource.lastIndexOf("/");
     const info = await client.load({ id: `vn-live2d-${++nextModel}`, assetPrefix: slash < 0 ? "" : nativeSource.slice(0, slash), manifest });
     let disposed = false;
+    let latestDrawables: Awaited<ReturnType<typeof client.update>>["drawables"] | undefined;
+    let dragParameters: Readonly<Record<string, number>> = {};
+    let transientMotion: CubismMotion3 | undefined;
+    let transientMotionSeconds = 0;
     const release = () => { void client.dispose().catch(error => options.onError?.(error)); };
     try {
       if (!(info.canvas.widthPixels > 0 && info.canvas.heightPixels > 0)) throw new Error("Live2D canvas dimensions must be positive");
+      const scale = Math.min(220 / info.canvas.widthPixels, 330 / info.canvas.heightPixels);
+      const dx = (240 - info.canvas.widthPixels * scale) / 2;
+      const dy = 340 - info.canvas.heightPixels * scale;
+      const interaction = definition.interactive === true
+        ? createCubismInteractionController({
+          hitAreas: manifest.hitAreas,
+          parameters: info.parameterMetadata ?? [],
+          canvas: info.canvas,
+          placement: { dx, dy, scale },
+        })
+        : undefined;
       const physics = manifest.physics
         ? info.parameterMetadata
           ? createCubismPhysics3Simulation(source.physics, info.parameterMetadata)
@@ -60,9 +75,6 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
           ? new CubismPose3Simulation(source.pose, info.parts, info.parameterDefaults)
           : (() => { throw new Error("Live2D pose requires real Core part IDs and default opacity facts"); })()
         : undefined;
-      const scale = Math.min(220 / info.canvas.widthPixels, 330 / info.canvas.heightPixels);
-      const dx = (240 - info.canvas.widthPixels * scale) / 2;
-      const dy = 340 - info.canvas.heightPixels * scale;
       const defaults = Object.fromEntries(info.parameterDefaults.map(item => [item.id, item.value]));
       let motion: CubismMotion3 | undefined;
       let animation: string | undefined;
@@ -80,18 +92,51 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
         if (next !== animation || (intent.loop ?? true) !== loop) {
           animation = next; loop = intent.loop ?? true; seconds = 0;
           motion = next === undefined ? undefined : { ...motions.get(next)!, loop };
+          transientMotion = undefined;
+          transientMotionSeconds = 0;
         }
         expression = intent.expression;
       };
       setIntent(initialIntent);
       const instance: NovelModelInstance = {
         setIntent,
+        ...(interaction ? {
+          hitTest(point: NovelModelPoint) {
+            return !disposed && latestDrawables !== undefined && interaction.hitAreaAt(latestDrawables, point) !== undefined;
+          },
+          tap(point: NovelModelPoint) {
+            if (disposed || !latestDrawables) return false;
+            const area = interaction.hitAreaAt(latestDrawables, point);
+            if (!area) return false;
+            const group = `Tap${area.name}`;
+            const name = [...motions.keys()].find(key => key === group || key.startsWith(`${group}:`));
+            const selected = name === undefined ? undefined : motions.get(name);
+            if (selected) {
+              transientMotion = { ...selected, loop: false };
+              transientMotionSeconds = 0;
+            }
+            return true;
+          },
+          drag(point: NovelModelPoint) {
+            if (disposed) return;
+            dragParameters = Object.fromEntries(interaction.dragParameters(point).map(entry => [entry.id, entry.value]));
+          },
+          endDrag() { dragParameters = {}; },
+        } : {}),
         async advance(deltaMs) {
           if (disposed) throw new Error("Live2D model is disposed");
           if (!Number.isFinite(deltaMs) || deltaMs < 0) throw new Error("Invalid Live2D frame interval");
           const boundedDeltaMs = Math.min(deltaMs, maxFrameDeltaMs);
           seconds += boundedDeltaMs / 1000;
-          const sample: CubismMotionFrame = motion ? evaluateCubismMotion3(motion, seconds) : { parameters: {}, partOpacities: {}, modelValues: {} };
+          let sample: CubismMotionFrame = motion ? evaluateCubismMotion3(motion, seconds) : { parameters: {}, partOpacities: {}, modelValues: {} };
+          if (transientMotion) {
+            sample = evaluateCubismMotion3(transientMotion, transientMotionSeconds);
+            transientMotionSeconds += boundedDeltaMs / 1000;
+            if (transientMotionSeconds >= transientMotion.duration) {
+              transientMotion = undefined;
+              transientMotionSeconds = 0;
+            }
+          }
           const sampled: Record<string, number> = { ...defaults, ...sample.parameters };
           if (sample.modelValues.EyeBlink !== undefined) for (const id of eyeBlinkIds) {
             sampled[id] = Object.hasOwn(sample.parameters, id) ? sampled[id]! * sample.modelValues.EyeBlink : sample.modelValues.EyeBlink;
@@ -99,10 +144,12 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
           if (sample.modelValues.LipSync !== undefined) for (const id of lipSyncIds) sampled[id] = (sampled[id] ?? 0) + sample.modelValues.LipSync;
           let parameters: Readonly<Record<string, number>> = sampled;
           if (expression) parameters = applyCubismExpression3(parameters, expressions.get(expression)!);
+          if (Object.keys(dragParameters).length > 0) parameters = { ...parameters, ...dragParameters };
           if (physics) parameters = physics.advance(parameters, boundedDeltaMs / 1000);
           let partOpacities: Readonly<Record<string, number>> = sample.partOpacities;
           if (pose) {
             const parameterWrites = new Set(Object.keys(sample.parameters));
+            for (const id of Object.keys(dragParameters)) parameterWrites.add(id);
             if (expression) for (const entry of expressions.get(expression)!.parameters) parameterWrites.add(entry.id);
             if (sample.modelValues.EyeBlink !== undefined) for (const id of eyeBlinkIds) parameterWrites.add(id);
             if (sample.modelValues.LipSync !== undefined) for (const id of lipSyncIds) parameterWrites.add(id);
@@ -119,6 +166,7 @@ export function createNovelLive2dFactory(host: PocketLive2dHost, sources: Readon
             { dx, dy, scale, opacity: modelOpacity },
           );
           if (disposed) return [];
+          latestDrawables = frame.drawables;
           const meshes = frame.drawables.filter(drawable => drawable.meshBytes.byteLength > 0).map((drawable): NovelModelMesh => {
             const alphaBlend = (drawable.blendMode >>> 8) & 0xff;
             const colorBlend = drawable.blendMode & 0xff;

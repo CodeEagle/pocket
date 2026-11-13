@@ -118,6 +118,7 @@
     },
     "hiyori_sample": {
       "kind": "live2d",
+      "interactive": true,
       "source": ".pocket-build/live2d/Hiyori/Hiyori.model3.json",
       "animations": [
         "Idle:0",

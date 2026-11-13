@@ -985,17 +985,33 @@ final class PocketSession extends ChangeNotifier {
         'Runtime became visible before its package was mounted',
       );
     }
-    // A background HTTP preparation may still be pending. The current local
-    // generation remains presentable; only a completed verified stage can be
-    // consumed by this open.
-    if (_backgroundPreparation != null && _download != null) {
-      return const <String, Object?>{'configured': true, 'updated': false};
-    }
-
     final previousBusy = _busy;
     _busy = true;
     _packageAdmissionInFlight = true;
     try {
+      // A remote-only MiniApp's previous cache-first open may still be checking
+      // the mutable update index. Do not present this resident generation as
+      // a successful no-op while that check is in flight: wait for its existing
+      // preparation, then consume its verified stage below. Bundled runtimes
+      // keep their presentable-cache behavior. Background failures are recorded
+      // by _prepareCacheFirstInBackground and leave the healthy package usable.
+      final backgroundPreparation = _backgroundPreparation;
+      if (_downloadOnOpen && backgroundPreparation != null) {
+        await backgroundPreparation;
+        if (_disposed) {
+          throw const PocketCapabilityException(
+            'host_closed',
+            'Session is closed',
+          );
+        }
+        if (canMount != null && !canMount()) {
+          throw const PocketCapabilityException(
+            'runtime_busy',
+            'Runtime became visible before its package was mounted',
+          );
+        }
+      }
+
       final staged = await _verifiedStagedCandidate(
         updates,
         mountedPackage: active?.package,

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createNovelEngine, SaveDataError, StoryValidationError } from "../src/engine.ts";
-import { orderedNovelCharacterIds, resolveNovelCharacterPlacement } from "../src/scene.ts";
+import { orderedNovelCharacterIds, resolveNovelCharacterPlacement, screenPointToNovelModelPoint } from "../src/scene.ts";
 import type { StoryDefinition } from "../src/types.ts";
 
 const story: StoryDefinition = {
@@ -52,4 +52,26 @@ test("invalid authored scale, rotation and layer fail before running", () => {
     const invalid = { ...story, script: { start: [{ type: "scene", characters: [{ id: "mira", ...update }] }] } };
     expect(() => createNovelEngine(invalid as StoryDefinition)).toThrow(StoryValidationError);
   }
+});
+
+test("Live2D viewport input reverses centered camera zoom and scaled rotated character placement", () => {
+  const stage = { insetL: 24, insetT: 42, width: 360, height: 640 };
+  const camera = { x: 21, y: -13, scale: 1.4 };
+  const character = { insetL: 48, insetT: 75, scale: 1.5, rotation: 27 };
+  const artScale = 0.95;
+  const expected = { x: 83, y: 212 };
+  const scale = character.scale * artScale;
+  const radians = character.rotation * Math.PI / 180;
+  const rotatedX = expected.x * scale * Math.cos(radians) - expected.y * scale * Math.sin(radians);
+  const rotatedY = expected.x * scale * Math.sin(radians) + expected.y * scale * Math.cos(radians);
+  const stageX = character.insetL + rotatedX;
+  const stageY = character.insetT + rotatedY;
+  const screen = {
+    x: stage.insetL + stage.width / 2 + (stageX - stage.width / 2) * camera.scale + camera.x,
+    y: stage.insetT + stage.height / 2 + (stageY - stage.height / 2) * camera.scale + camera.y,
+  };
+
+  const actual = screenPointToNovelModelPoint(screen, stage, camera, character, artScale);
+  expect(actual?.x).toBeCloseTo(expected.x, 8);
+  expect(actual?.y).toBeCloseTo(expected.y, 8);
 });

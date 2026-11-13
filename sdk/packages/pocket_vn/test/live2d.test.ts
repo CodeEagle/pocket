@@ -71,6 +71,7 @@ test("Live2D factory preserves native facts, evaluates JS motion, forwards place
   } };
   const factory = createNovelLive2dFactory(host, { [definition.source]: { document, motions: { "Idle:0": motion }, expressions: { half: expression } } });
   const instance = await factory(definition, { key: "actor", expression: "half" });
+  expect(instance.hitTest).toBeUndefined(); // Interactions remain opt-in for existing model registries.
   const first = await instance.advance(500);
   expect(first.map(mesh => mesh.id)).toEqual(["art", "emptyNormal", "emptyInverted", "mask"]);
   expect(first[0]!.effect?.masks).toEqual(["mask"]);
@@ -103,6 +104,71 @@ test("Live2D factory preserves native facts, evaluates JS motion, forwards place
   instance.dispose();
   await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   expect(calls.filter(call => call.capability.endsWith("release"))).toHaveLength(1);
+});
+
+test("interactive Live2D hit areas trigger transient Tap motions and Core-ranged drag parameters", async () => {
+  const interactionDocument = { ...document, HitAreas: [{ Id: "HitArea", Name: "Body" }] };
+  const mainMotion = { Version: 3, Meta: { Duration: 2, Fps: 30, Loop: true, AreBeziersRestricted: true }, Curves: [
+    { Target: "Parameter", Id: "ParamAngleX", Segments: [0, 5, 0, 2, 5] },
+  ] };
+  const tapMotion = { Version: 3, Meta: { Duration: 1, Fps: 30, Loop: true, AreBeziersRestricted: true }, Curves: [
+    { Target: "Parameter", Id: "ParamAngleX", Segments: [0, 20, 0, 1, 0] },
+  ] };
+  const updates: { id: string; value: number }[][] = [];
+  const host = { async request(capability: string, params: Record<string, unknown>) {
+    if (capability.endsWith("load")) return {
+      modelId: "interactive-1", drawableCount: 1, mocVersion: 5, nativeBytes: 1024, parameterCount: 4,
+      parameterDefaults: [
+        { id: "ParamAngleX", value: 0 }, { id: "ParamAngleY", value: 0 },
+        { id: "ParamAngleZ", value: 0 }, { id: "ParamBodyAngleX", value: 0 },
+      ],
+      parameterMetadata: [
+        { id: "ParamAngleX", minimum: -30, maximum: 30, defaultValue: 0 },
+        { id: "ParamAngleY", minimum: -30, maximum: 30, defaultValue: 0 },
+        { id: "ParamAngleZ", minimum: -30, maximum: 30, defaultValue: 0 },
+        { id: "ParamBodyAngleX", minimum: -10, maximum: 10, defaultValue: 0 },
+      ],
+      canvas: { widthPixels: 100, heightPixels: 100, originXPixels: 50, originYPixels: 50, pixelsPerUnit: 100 },
+    };
+    if (capability.endsWith("release")) return { released: true };
+    const parameters = params.parameters as { id: string; value: number }[];
+    updates.push(parameters);
+    const placement = params.placement as { dx: number; dy: number; scale: number; opacity?: number };
+    return { modelId: "interactive-1", drawables: [{
+      id: "HitArea", textureIndex: 0, drawOrder: 0, renderOrder: 0, blendMode: 0,
+      constantFlags: 0, dynamicFlags: 0, opacity: 0,
+      // HitArea remains usable when its helper ArtMesh is intentionally not painted.
+      meshBytes: packMockNativePms1([0, 0, 100, 0, 0, 100], [0, 0, 1, 0, 0, 1], [0, 1, 2], 0, placement),
+      maskIndices: [], multiplyColorRgba: [1, 1, 1, 1], screenColorRgba: [0, 0, 0, 0],
+    }] };
+  } };
+  const interactiveDefinition: NovelModelDefinition = { ...definition, interactive: true };
+  const factory = createNovelLive2dFactory(host, { [definition.source]: {
+    document: interactionDocument,
+    motions: { "Idle:0": mainMotion, "TapBody:0": tapMotion },
+    expressions: {},
+  } });
+  const instance = await factory(interactiveDefinition, { key: "actor", animation: "Idle:0", loop: true });
+  await instance.advance(0);
+  expect(instance.hitTest?.({ x: 20, y: 130 })).toBe(true);
+  expect(instance.hitTest?.({ x: 230, y: 340 })).toBe(false);
+  expect(instance.tap?.({ x: 20, y: 130 })).toBe(true);
+  await instance.advance(0);
+  expect(updates.at(-1)!.find(value => value.id === "ParamAngleX")!.value).toBe(20);
+
+  instance.drag?.({ x: 230, y: 120 });
+  await instance.advance(0);
+  const tracked = Object.fromEntries(updates.at(-1)!.map(value => [value.id, value.value]));
+  expect(tracked.ParamAngleX).toBeCloseTo(30);
+  expect(tracked.ParamAngleY).toBeCloseTo(30);
+  expect(tracked.ParamAngleZ).toBeCloseTo(30);
+  expect(tracked.ParamBodyAngleX).toBeCloseTo(3.5);
+  instance.endDrag?.();
+  await instance.advance(1000); // Finish the temporary TapBody motion.
+  await instance.advance(0);
+  expect(updates.at(-1)!.find(value => value.id === "ParamAngleX")!.value).toBe(5);
+  instance.dispose();
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
 });
 
 test("referenced Live2D physics must be bundled and MFX1 validation preserves reused buffers on failure", async () => {

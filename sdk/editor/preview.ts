@@ -26,6 +26,8 @@ import { servePreviewMedia } from "./preview_media_assets.ts";
 import type { LocalBluetoothProvider } from "./local_bluetooth.ts";
 import { hotCommandSource, hotIdentity, type HotIdentity } from "./hot_reload.ts";
 import { createPreviewLive2d } from "./live2d.ts";
+import { createPreviewMeshWireEncoder, previewMeshWireDecoderSource } from "./preview_mesh_wire.ts";
+import { enqueuePreviewPacket, previewStreamByteLengthStrategy } from "./preview_stream_queue.ts";
 import { encodeMessage } from "../targets/wechat/template/binary-bridge.js";
 import type { DiagnosticsCollector } from "../packages/pocket_diagnostics/src/types.ts";
 
@@ -1643,6 +1645,7 @@ type Subscriber = {
   browserPresentation: boolean;
   compactResources: boolean;
   externalResources: boolean;
+  meshWire?: ReturnType<typeof createPreviewMeshWireEncoder>;
   webBluetooth?: { clientId: string; lease: string };
 };
 
@@ -2190,9 +2193,9 @@ class PreviewSession {
     } });
   }
 
-  private encodeExternalPacket(value: unknown): Uint8Array {
+  private externalPacket(value: unknown): unknown {
     const candidate = value as { type?: string; frame?: PreviewFrame } | null;
-    if (candidate?.type !== "frame" || !Array.isArray(candidate.frame?.resources)) return encodePreviewStreamPacket(value);
+    if (candidate?.type !== "frame" || !Array.isArray(candidate.frame?.resources)) return value;
     const resources = candidate.frame.resources.map(resource => {
       const encoded = resource.bytesEncoding === "base64";
       if (!Array.isArray(resource.pixels) && !(encoded && typeof resource.pixels === "string")) return resource;
@@ -2206,7 +2209,16 @@ class PreviewSession {
       return { ...metadata, bytesEncoding: "external", pixelsUrl: url("pixels"), pixelsBytes: byteLength(pixels),
         ...(Array.isArray(palette) || encoded && typeof palette === "string" ? { paletteUrl: url("palette"), paletteBytes: byteLength(palette) } : {}) };
     });
-    return encodePreviewStreamPacket({ ...candidate, frame: { ...candidate.frame, resources } });
+    return { ...candidate, frame: { ...candidate.frame, resources } };
+  }
+
+  private encodeExternalPacket(value: unknown): Uint8Array {
+    return encodePreviewStreamPacket(this.externalPacket(value));
+  }
+
+  private encodeSubscriberPacket(subscriber: Subscriber, value: unknown): Uint8Array {
+    const packet = subscriber.externalResources ? this.externalPacket(value) : value;
+    return encodePreviewStreamPacket(subscriber.meshWire ? subscriber.meshWire.encode(packet) : packet, subscriber.compactResources);
   }
 
   private updateResourceCache(frame: PreviewFrame): void {
@@ -2267,29 +2279,47 @@ class PreviewSession {
     }, Math.max(1000, delay));
   }
 
+  /** One cleanup path for cancellation, transport failure and slow consumers. */
+  private removeSubscriber(subscriber: Subscriber, error?: unknown): void {
+    if (subscriber.closed) return;
+    subscriber.closed = true;
+    this.subscribers.delete(subscriber);
+    if (error !== undefined) {
+      try { subscriber.controller.error(error); } catch { /* stream already closed */ }
+    }
+    if (this.subscribers.size === 0) {
+      if (this.tickTimer) clearTimeout(this.tickTimer);
+      this.tickTimer = undefined;
+      this.tickDeadlineAt = undefined;
+      if (!this.disposed) this.armIdleCleanup();
+    }
+    if (subscriber.webBluetooth && this.webBluetoothOwner?.lease === subscriber.webBluetooth.lease) {
+      const ownerStillConnected = [...this.subscribers].some(candidate =>
+        !candidate.closed && candidate.webBluetooth?.lease === subscriber.webBluetooth?.lease);
+      if (!ownerStillConnected) this.releaseWebBluetoothOwner(subscriber.webBluetooth.lease);
+    }
+    this.failPendingPresentationsIfBrowserGone();
+    if (subscriber.browserPresentation) this.cancelActivePointersIfBrowserGone();
+  }
+
   private emit(value: unknown): void {
     let canonical: Uint8Array | undefined;
     let compact: Uint8Array | undefined;
     let external: Uint8Array | undefined;
-    let subscriberDropped = false;
     for (const subscriber of this.subscribers) {
       if (subscriber.closed) continue;
       try {
-        const bytes = subscriber.externalResources
+        const bytes = subscriber.meshWire
+          ? this.encodeSubscriberPacket(subscriber, value)
+          : subscriber.externalResources
           ? (external ??= this.encodeExternalPacket(value))
           : subscriber.compactResources
           ? (compact ??= encodePreviewStreamPacket(value, true))
           : (canonical ??= encodePreviewStreamPacket(value));
-        subscriber.controller.enqueue(bytes);
-      } catch {
-        subscriber.closed = true;
-        this.subscribers.delete(subscriber);
-        subscriberDropped = true;
+        enqueuePreviewPacket(subscriber.controller, bytes);
+      } catch (error) {
+        this.removeSubscriber(subscriber, error);
       }
-    }
-    if (subscriberDropped) {
-      this.failPendingPresentationsIfBrowserGone();
-      this.cancelActivePointersIfBrowserGone();
     }
   }
 
@@ -2470,10 +2500,8 @@ class PreviewSession {
     if (!owner || !subscriber.webBluetooth || subscriber.webBluetooth.lease !== owner.lease) return;
     const queue = owner.queue.splice(0);
     for (const packet of queue) {
-      try { subscriber.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(packet)}\n\n`)); } catch {
-        subscriber.closed = true;
-        this.subscribers.delete(subscriber);
-        this.releaseWebBluetoothOwner(owner.lease);
+      try { enqueuePreviewPacket(subscriber.controller, new TextEncoder().encode(`data: ${JSON.stringify(packet)}\n\n`)); } catch (error) {
+        this.removeSubscriber(subscriber, error);
         break;
       }
     }
@@ -3147,8 +3175,12 @@ class PreviewSession {
     const rootGeneration = root.generation;
     const requestedPump = runtime.needsPump;
     runtime.needsPump = false;
-    const frameDelta = Math.max(0, deltaMs) + (runtime.pendingFrameDeltaMs ?? 0);
-    runtime.pendingFrameDeltaMs = 0;
+    // Settle the response at the same display time. Consuming another tick's
+    // queued delta here starts a new animation/host request inside the settle
+    // chain, which can keep it alive until its 32-pass safety limit. Retain
+    // that elapsed time for the next display pump, after publishing this one.
+    const frameDelta = Math.max(0, deltaMs) + (pass === 0 ? runtime.pendingFrameDeltaMs ?? 0 : 0);
+    if (pass === 0) runtime.pendingFrameDeltaMs = 0;
     const flight = { generation };
     runtime.frameInFlight = flight;
     void runtime.probe.checked({ op: "frame", deltaMs: frameDelta, rawFrame: true }).then(
@@ -4872,44 +4904,33 @@ class PreviewSession {
     this.releaseWebBluetoothOwner(owner.lease);
   }
 
-  stream(browserPresentation = false, webBluetooth?: { clientId: string; lease: string }, compactResources = false, externalResources = false): Response {
+  stream(browserPresentation = false, webBluetooth?: { clientId: string; lease: string }, compactResources = false, externalResources = false, retainedMeshes = false): Response {
     this.touch();
     const encoder = new TextEncoder();
     let subscriber!: Subscriber;
     const body = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        subscriber = { controller, closed: false, browserPresentation, compactResources, externalResources, ...(webBluetooth ? { webBluetooth } : {}) };
+        subscriber = { controller, closed: false, browserPresentation, compactResources, externalResources, ...(retainedMeshes ? { meshWire: createPreviewMeshWireEncoder() } : {}), ...(webBluetooth ? { webBluetooth } : {}) };
         this.subscribers.add(subscriber);
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "status", status: this.status() })}\n\n`));
-        const replay = this.replayFrame();
-        if (replay) controller.enqueue(externalResources ? this.encodeExternalPacket({ type: "frame", revision: this.artifactRevision ?? null, frame: replay }) : encodePreviewStreamPacket({ type: "frame", revision: this.artifactRevision ?? null, frame: replay }, compactResources));
-        this.flushWebBluetoothQueue(subscriber);
-        void this.schedule().catch((error) => this.reportError(error));
-      },
-      cancel: () => {
-        subscriber.closed = true;
-        this.subscribers.delete(subscriber);
-        if (this.subscribers.size === 0 && this.tickTimer) {
-          clearTimeout(this.tickTimer);
-          this.tickTimer = undefined;
-          this.tickDeadlineAt = undefined;
+        try {
+          enqueuePreviewPacket(controller, encoder.encode(`data: ${JSON.stringify({ type: "status", status: this.status() })}\n\n`));
+          const replay = this.replayFrame();
+          if (replay) enqueuePreviewPacket(controller, this.encodeSubscriberPacket(subscriber, { type: "frame", revision: this.artifactRevision ?? null, frame: replay }));
+          this.flushWebBluetoothQueue(subscriber);
+        } catch (error) {
+          this.removeSubscriber(subscriber, error);
+          return;
         }
-        if (this.subscribers.size === 0) this.armIdleCleanup();
-        if (subscriber.webBluetooth && this.webBluetoothOwner?.lease === subscriber.webBluetooth.lease) {
-          const ownerStillConnected = [...this.subscribers].some((candidate) =>
-            !candidate.closed && candidate.webBluetooth?.lease === subscriber.webBluetooth?.lease);
-          if (!ownerStillConnected) this.releaseWebBluetoothOwner(subscriber.webBluetooth.lease);
-        }
-        this.failPendingPresentationsIfBrowserGone();
-        if (subscriber.browserPresentation) this.cancelActivePointersIfBrowserGone();
+        if (!subscriber.closed) void this.schedule().catch((error) => this.reportError(error));
       },
-    });
+      cancel: () => this.removeSubscriber(subscriber),
+    }, previewStreamByteLengthStrategy);
     return new Response(body, {
       headers: {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-store, must-revalidate",
         connection: "keep-alive",
-        "x-pocket-preview-transport": "native-probe-full-frames",
+        "x-pocket-preview-transport": retainedMeshes ? "native-probe-retained-meshes-v1" : "native-probe-full-frames",
       },
     });
   }
@@ -5040,7 +5061,7 @@ class PreviewManagerImpl implements PreviewManager {
     const projection = optics.replace('"" /* pocket-liquid-glass-shader */', JSON.stringify(shader));
     // Bluetooth is served by the local Noble helper. Do not inject a browser
     // browser Bluetooth adapter into the projection document.
-    return `${projection}\n${source}`;
+    return `${projection}\n${previewMeshWireDecoderSource()}\n${source}`;
   }
 
   private async document(projectId: string): Promise<Response> {
@@ -5085,7 +5106,7 @@ class PreviewManagerImpl implements PreviewManager {
         const pluginOwner = webBluetooth ? session.claimWebBluetooth(clientId, "local") : undefined;
         if (webBluetooth && !pluginOwner) return failure("Noble Bluetooth client could not claim the preview", 409);
         await session.ensureStarted();
-        return session.stream(query.get("presentation") === "browser", pluginOwner, query.get("resources") === "base64", query.get("resources") === "http");
+        return session.stream(query.get("presentation") === "browser", pluginOwner, query.get("resources") === "base64", query.get("resources") === "http", query.get("meshes") === "retained-v1");
       }
       if (route === "status" && request.method === "GET") return json(session.status());
       if (route === "snapshot" && request.method === "GET") return json(session.snapshot());
