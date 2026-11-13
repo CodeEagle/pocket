@@ -204,46 +204,71 @@ async function assertPortOwnership(port, allowForeign) {
 // Keep the detached updater alive while retiring its old Studio process and
 // unrelated worker branches.
 function protectedRetirementPlan(processes, targetPid, protectedPid) {
-  const parents = new Map(processes.map(info => [Number(info.pid), Number(info.ppid)]));
-  const path = [];
-  const visited = new Set();
-  let pid = Number(protectedPid);
-  while (pid > 0 && !visited.has(pid)) {
-    visited.add(pid);
-    path.push(pid);
-    if (pid === Number(targetPid)) break;
-    pid = parents.get(pid);
-  }
-  if (path.at(-1) !== Number(targetPid)) return null;
-  const protectedPath = new Set(path);
-  const directPids = path.filter(pid => pid !== Number(protectedPid));
-  const ancestors = new Set(directPids);
-  const subtreeRoots = processes
-    .filter(info => ancestors.has(Number(info.ppid)) && !protectedPath.has(Number(info.pid)))
-    .map(info => Number(info.pid));
-  return { subtreeRoots, directPids };
-}
-
-function protectedProcessIsOutsideTargetTree(processes, targetPid, protectedPid) {
-  const parents = new Map(processes.map(info => [Number(info.pid), Number(info.ppid)]));
   const target = Number(targetPid);
-  let pid = Number(protectedPid);
-  const visited = new Set();
+  const protectedPidNumber = Number(protectedPid);
+  if (
+    !Array.isArray(processes)
+    || !Number.isInteger(target) || target <= 0
+    || !Number.isInteger(protectedPidNumber) || protectedPidNumber <= 0
+    || target === protectedPidNumber
+  ) return null;
 
-  // A detached updater may have already been reparented to init/launchd. Only
-  // fall back to recursive tree killing when this complete ancestry chain
-  // proves the updater is no longer beneath the process being retired.
-  while (pid > 1 && !visited.has(pid)) {
-    if (pid === target || !parents.has(pid)) return false;
-    visited.add(pid);
-    const parent = parents.get(pid);
-    if (!Number.isInteger(parent)) return false;
-    if (parent === target) return false;
-    if (parent === 1 || parent === 0) return target !== parent;
-    if (parent < 0 || !parents.has(parent)) return false;
-    pid = parent;
+  const parents = new Map();
+  const children = new Map();
+  for (const info of processes) {
+    const pid = Number(info?.pid);
+    const ppid = Number(info?.ppid);
+    if (
+      info?.pid == null || info?.ppid == null
+      || !Number.isInteger(pid) || pid < 0
+      || !Number.isInteger(ppid) || ppid < 0
+      || parents.has(pid)
+    ) return null;
+    parents.set(pid, ppid);
+    children.set(pid, []);
   }
-  return pid === 1 && target !== 1;
+
+  if (!parents.has(target) || !parents.has(protectedPidNumber)) return null;
+  for (const [pid, ppid] of parents) {
+    if (pid !== 0 && children.has(ppid)) children.get(ppid).push(pid);
+  }
+
+  const collectSubtree = rootPid => {
+    const subtree = new Set();
+    const pending = [rootPid];
+    while (pending.length) {
+      const pid = pending.pop();
+      if (subtree.has(pid)) return null;
+      subtree.add(pid);
+      pending.push(...(children.get(pid) || []));
+    }
+    return subtree;
+  };
+
+  const protectedSubtree = collectSubtree(protectedPidNumber);
+  if (!protectedSubtree || protectedSubtree.has(target)) return null;
+
+  // Retire the target tree from leaves upward, but exclude the protected
+  // process and every child visible beneath it in this same process snapshot.
+  // Sending one signal per PID avoids platform tree-kill APIs (notably
+  // Windows taskkill /T) whose recursion can outlive or reinterpret PPID links.
+  const pids = [];
+  const visiting = new Set();
+  const visited = new Set();
+  const appendPostorder = pid => {
+    if (visiting.has(pid)) return false;
+    if (visited.has(pid)) return true;
+    visiting.add(pid);
+    for (const childPid of children.get(pid) || []) {
+      if (!protectedSubtree.has(childPid) && !appendPostorder(childPid)) return false;
+    }
+    visiting.delete(pid);
+    visited.add(pid);
+    pids.push(pid);
+    return true;
+  };
+  if (!appendPostorder(target)) return null;
+  return { pids };
 }
 
 function signalProcess(pid, signal) {
@@ -251,33 +276,114 @@ function signalProcess(pid, signal) {
   catch (error) { if (error.code !== "ESRCH") throw error; }
 }
 
-async function killTree(pid, signal, protectedPid) {
-  if (protectedPid) {
-    const processes = await findProcess("name", "");
-    const plan = protectedRetirementPlan(processes, pid, protectedPid);
-    if (plan && Number(pid) !== Number(protectedPid) && plan.directPids.includes(Number(pid))) {
-      for (const childPid of plan.subtreeRoots) await killTree(childPid, signal);
-      for (const directPid of plan.directPids) signalProcess(directPid, signal);
-      return;
-    }
-    if (!protectedProcessIsOutsideTargetTree(processes, pid, protectedPid)) {
-      throw new Error(`拒绝递归停止进程 ${pid}：无法证明 updater ${protectedPid} 位于其进程树之外`);
-    }
+function processSnapshotDetails(processes, targetPid, protectedPid) {
+  const byPid = new Map((Array.isArray(processes) ? processes : []).map(info => [Number(info?.pid), Number(info?.ppid)]));
+  const protectedAncestry = [];
+  let ancestor = Number(protectedPid);
+  const seen = new Set();
+  while (Number.isInteger(ancestor) && ancestor > 0 && !seen.has(ancestor) && protectedAncestry.length < 16) {
+    seen.add(ancestor);
+    const parent = byPid.get(ancestor);
+    protectedAncestry.push({ pid: ancestor, ppid: Number.isInteger(parent) ? parent : null });
+    if (!Number.isInteger(parent) || parent <= 0) break;
+    ancestor = parent;
   }
+  const target = Number(targetPid);
+  const targetParent = byPid.get(target);
+  return {
+    target: { pid: target, ppid: Number.isInteger(targetParent) ? targetParent : null },
+    protectedAncestry,
+  };
+}
+
+function protectedProcessSnapshotError(processes, targetPid, protectedPid) {
+  return new Error(
+    `拒绝停止进程 ${targetPid}：updater ${protectedPid} 的进程快照无效或存在祖先冲突 `
+    + JSON.stringify(processSnapshotDetails(processes, targetPid, protectedPid)),
+  );
+}
+
+async function killTree(pid, signal) {
   return new Promise(resolveKill => {
     try { treeKill(Number(pid), signal, () => resolveKill()); }
     catch { resolveKill(); }
   });
 }
 
+function processIsRunning(pid) {
+  if (process.platform !== "win32") {
+    try {
+      const state = execFileSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
+      return Boolean(state) && !/^[ZX]/.test(state);
+    } catch (error) {
+      if (error.status === 1) return false;
+    }
+  }
+  try { process.kill(Number(pid), 0); return true; }
+  catch (error) { return error.code !== "ESRCH"; }
+}
+
 async function waitProcessesGone(pids, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const alive = pids.some(pid => { try { process.kill(Number(pid), 0); return true; } catch { return false; } });
+    const alive = pids.some(processIsRunning);
     if (!alive) return true;
     await sleep(250);
   }
-  return !pids.some(pid => { try { process.kill(Number(pid), 0); return true; } catch { return false; } });
+  return !pids.some(processIsRunning);
+}
+
+function sameProcessSnapshotIdentity(expected, current) {
+  if (Number(expected?.pid) <= 0 || Number(current?.pid) !== Number(expected.pid)) return false;
+  const expectedCommand = String(expected?.cmd || expected?.cmdline || expected?.command || "").trim();
+  const currentCommand = String(current?.cmd || current?.cmdline || current?.command || "").trim();
+  const expectedBin = String(expected?.bin || "").trim();
+  const currentBin = String(current?.bin || "").trim();
+  const expectedName = String(expected?.name || "").trim();
+  const currentName = String(current?.name || "").trim();
+  if (expectedCommand && (!currentCommand || expectedCommand !== currentCommand)) return false;
+  if (expectedBin && (!currentBin || normalized(expectedBin) !== normalized(currentBin))) return false;
+  if (expectedName && currentName && normalized(expectedName) !== normalized(currentName)) return false;
+  return Boolean((expectedCommand && currentCommand) || (expectedBin && currentBin));
+}
+
+async function signalVerifiedProcess(expected, signal, validateCurrent) {
+  const pid = Number(expected?.pid);
+  if (!processIsRunning(pid)) return false;
+
+  const found = await findProcess("pid", pid);
+  const current = Array.isArray(found) ? found.find(entry => Number(entry?.pid) === pid) : undefined;
+  if (!current) {
+    if (!processIsRunning(pid)) return false;
+  } else if (sameProcessSnapshotIdentity(expected, current) && validateCurrent(expected, current)) {
+    signalProcess(pid, signal);
+    return true;
+  }
+
+  const currentPpid = Number(current?.ppid);
+  throw new Error(
+    `拒绝发送 ${signal} 给进程 ${pid}：无法确认其仍是初始快照中的目标 `
+    + JSON.stringify({ expected: { pid, ppid: Number(expected.ppid) }, current: { pid: current ? Number(current.pid) : null, ppid: Number.isInteger(currentPpid) ? currentPpid : null } }),
+  );
+}
+
+async function terminateProcessSet(processes, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 1500;
+  const killTimeoutMs = options.killTimeoutMs ?? 2000;
+  const validateCurrent = options.validateCurrent ?? (() => true);
+  const unique = new Map();
+  for (const info of processes) {
+    const pid = Number(info?.pid);
+    if (!Number.isInteger(pid) || pid <= 0 || unique.has(pid)) continue;
+    unique.set(pid, info);
+  }
+  const entries = [...unique.values()];
+  const pids = entries.map(info => Number(info.pid));
+  for (const info of entries) await signalVerifiedProcess(info, "SIGTERM", validateCurrent);
+  if (await waitProcessesGone(pids, timeoutMs)) return true;
+
+  for (const info of entries) await signalVerifiedProcess(info, "SIGKILL", validateCurrent);
+  return waitProcessesGone(pids, killTimeoutMs);
 }
 
 async function stopOwnedPort(port, required, protectedPid) {
@@ -289,14 +395,43 @@ async function stopOwnedPort(port, required, protectedPid) {
   }
   if (!state.owned.length) return;
   const pids = state.owned.map(info => Number(info.pid));
-  for (const pid of pids) await killTree(pid, "SIGTERM", protectedPid);
+  if (protectedPid) {
+    const processes = await findProcess("name", "");
+    const byPid = new Map(processes.map(info => [Number(info.pid), info]));
+    const planned = new Map();
+    for (const pid of pids) {
+      if (planned.has(pid)) continue;
+      const target = byPid.get(pid);
+      if (!target) {
+        if (!processIsRunning(pid)) continue;
+        throw protectedProcessSnapshotError(processes, pid, protectedPid);
+      }
+      const plan = protectedRetirementPlan(processes, pid, protectedPid);
+      if (!plan) throw protectedProcessSnapshotError(processes, pid, protectedPid);
+      for (const plannedPid of plan.pids) {
+        const info = byPid.get(plannedPid);
+        if (!info) throw protectedProcessSnapshotError(processes, pid, protectedPid);
+        if (!planned.has(plannedPid)) planned.set(plannedPid, info);
+      }
+    }
+    const rootPids = new Set(pids);
+    const terminated = await terminateProcessSet([...planned.values()], {
+      validateCurrent: (expected, current) => !rootPids.has(Number(expected.pid)) || sameCheckoutServer(current, port),
+    });
+    const remaining = (await findPortProcesses(port)).filter(info => required || sameCheckoutServer(info, port));
+    if (remaining.length || !terminated) {
+      throw new Error(`端口 ${port} 的 Pocket Studio 进程没有退出`);
+    }
+    return;
+  }
+  for (const pid of pids) await killTree(pid, "SIGTERM");
   if (!(await waitProcessesGone(pids, 1500))) {
     for (const pid of pids) {
       try { process.kill(pid, 0); } catch { continue; }
       const current = (await findProcess("pid", pid))?.[0];
       if (!current) continue;
       if (!sameCheckoutServer(current, port)) throw new Error(`拒绝强制停止未知进程 PID ${pid}`);
-      await killTree(pid, "SIGKILL", protectedPid);
+      await killTree(pid, "SIGKILL");
     }
   }
   const remaining = (await findPortProcesses(port)).filter(info => required || sameCheckoutServer(info, port));
@@ -701,7 +836,7 @@ function isEntrypoint(entry = process.argv[1], moduleUrl = import.meta.url) {
   return Boolean(entry && sameFileSystemPath(entry, fileURLToPath(moduleUrl)));
 }
 
-export { configFromHealth, editorToolEnvironment, isEntrypoint, commandIncludesPath, protectedRetirementPlan, protectedProcessIsOutsideTargetTree, killTree, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
+export { configFromHealth, editorToolEnvironment, isEntrypoint, commandIncludesPath, protectedRetirementPlan, terminateProcessSet, makePidRecord, mergeLaunchOptions, parseArgs, parsePidRecord, serviceConfig, upgradeApply };
 
 if (isEntrypoint()) {
   main().catch(error => {

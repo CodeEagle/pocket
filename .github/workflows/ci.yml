@@ -17,7 +17,7 @@ jobs:
     name: architecture-and-rust
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify repository architecture contracts
         run: python3 sdk/scripts/check_architecture.py
@@ -32,13 +32,13 @@ jobs:
           components: clippy
 
       - name: Cache pinned PocketJS upstream
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: sdk/.cache/pocketjs
           key: pocketjs-upstream-${{ hashFiles('sdk/scripts/prepare_upstream.py', 'sdk/native/patches/**') }}
 
       - name: Cache Cargo registry and native target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -134,13 +134,61 @@ jobs:
 
 
 
+  studio-upgrade-windows:
+    name: studio-upgrade-windows
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      - name: Install pinned compiler patch dependency
+        run: choco install patch -y --no-progress
+
+      - name: Prepare pinned compiler sources for Studio imports
+        shell: bash
+        run: |
+          python scripts/prepare_upstream.py
+          bun install --frozen-lockfile --cwd .cache/pocketjs
+
+      - name: Install SDK dependencies without install scripts
+        run: npm install --ignore-scripts --legacy-peer-deps --no-audit --no-fund
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Verify standalone Studio upgrade on Windows
+        env:
+          POCKET_SOURCE_BUILD: "1"
+        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts scripts/tests/editor_service.test.ts
+
+      - name: Preserve upgrade failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: studio-upgrade-windows-diagnostics
+          path: ${{ runner.temp }}/pocket-studio-upgrade-diagnostics/
+          if-no-files-found: ignore
+
   js-sdk-and-guest:
     name: js-sdk-and-guest
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -154,13 +202,13 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache pinned PocketJS upstream
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: sdk/.cache/pocketjs
           key: pocketjs-upstream-${{ hashFiles('sdk/scripts/prepare_upstream.py', 'sdk/native/patches/**') }}
 
       - name: Cache Cargo release binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -190,7 +238,7 @@ jobs:
         working-directory: sdk
         run: npx playwright install --with-deps chromium
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: web-engine-cache
         with:
           path: sdk/.pocket-build/web-engine
@@ -211,7 +259,7 @@ jobs:
         run: cargo build --locked --release --manifest-path sdk/native/Cargo.toml --bin pocket_probe --bin pocketjs_bytecode
 
       - name: Fetch pinned official Hiyori sample resources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Live2D/CubismNativeSamples
           ref: b8024738f108e6003e4925193e8d5ec04cd18196
@@ -227,7 +275,7 @@ jobs:
           POCKET_BYTECODE_BIN: ${{ github.workspace }}/sdk/native/target/release/pocketjs_bytecode
         run: bun scripts/build_mini_apps.ts --mini-app=lantern
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lantern-guest
           path: demo/assets/apps/lantern
@@ -271,7 +319,7 @@ jobs:
 
       - name: Preserve failed Studio upgrade diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: studio-upgrade-linux-diagnostics
           include-hidden-files: true
@@ -287,9 +335,9 @@ jobs:
     needs: js-sdk-and-guest
     if: ${{ !cancelled() && needs.js-sdk-and-guest.result != 'cancelled' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: lantern-guest
           path: demo/assets/apps/lantern

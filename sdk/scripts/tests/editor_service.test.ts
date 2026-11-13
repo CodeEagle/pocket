@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -16,8 +17,7 @@ import {
   editorToolEnvironment,
   isEntrypoint,
   protectedRetirementPlan,
-  protectedProcessIsOutsideTargetTree,
-  killTree,
+  terminateProcessSet,
   commandIncludesPath,
   upgradeApply,
   makePidRecord,
@@ -28,6 +28,7 @@ import {
 
 const fixture = (name: string) => resolve(tmpdir(), name);
 const SCRIPT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "editor_service.mjs");
+const findProcess = createRequire(import.meta.url)("find-process").default;
 
 function tarOctal(value: number, width: number): string {
   return `${Math.max(0, Math.trunc(value)).toString(8).padStart(width - 1, "0")}\0`;
@@ -253,12 +254,35 @@ test("upgrade retirement excludes the updater ancestry while retaining worker tr
     { pid: 999, ppid: 1 }, // unrelated process
   ];
   expect(protectedRetirementPlan(processes, 100, 121)).toEqual({
-    subtreeRoots: [110, 123], directPids: [120, 100],
+    pids: [111, 110, 123, 120, 100],
   });
   expect(protectedRetirementPlan(processes, 100, 120)).toEqual({
-    subtreeRoots: [110], directPids: [100],
+    pids: [111, 110, 100],
   });
-  expect(protectedRetirementPlan(processes, 100, 999)).toBeNull();
+  expect(protectedRetirementPlan(processes, 100, 999)).toEqual({
+    pids: [111, 110, 122, 121, 123, 120, 100],
+  });
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0 },
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: 800 }, // exited launcher; only snapshot PIDs can be signaled
+  ], 100, 200)).toEqual({ pids: [100] });
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0 },
+    { pid: 200, ppid: 1 },
+    { pid: 100, ppid: 200 }, // target nested below updater; retirement is unsafe
+  ], 100, 200)).toBeNull();
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0 },
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: Number.NaN },
+  ], 100, 200)).toBeNull();
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0 },
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: 1 },
+    { pid: 200, ppid: 1 },
+  ], 100, 200)).toBeNull();
   expect(protectedRetirementPlan([{ pid: 1, ppid: 2 }, { pid: 2, ppid: 1 }], 100, 1)).toBeNull();
 });
 
@@ -266,13 +290,18 @@ test("upgrade retirement excludes the updater ancestry while retaining worker tr
 test("upgrade retirement kills the real server tree but preserves its detached updater", { timeout: 10_000 }, async () => {
   const source = `
     const { spawn } = require("node:child_process");
-    const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const worker = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); process.stdout.write('ready'); setInterval(() => {}, 1000)"], { stdio: ["ignore", "pipe", "ignore"] });
     const updater = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
     const waitForSpawn = (child) => new Promise((resolve, reject) => {
       child.once("spawn", resolve);
       child.once("error", reject);
     });
-    Promise.all([waitForSpawn(worker), waitForSpawn(updater)]).then(() => {
+    const waitForWorkerReady = new Promise((resolve, reject) => {
+      worker.stdout.once("data", resolve);
+      worker.once("error", reject);
+      worker.once("exit", (code) => reject(new Error("worker exited before installing its signal handler: " + code)));
+    });
+    Promise.all([waitForSpawn(updater), waitForWorkerReady]).then(() => {
       updater.unref();
       process.stdout.write(JSON.stringify({ workerPid: worker.pid, updaterPid: updater.pid }) + "\\n");
     }, (error) => {
@@ -315,7 +344,20 @@ test("upgrade retirement kills the real server tree but preserves its detached u
       expect(updaterPpid.status).toBe(0);
       expect(Number(updaterPpid.stdout.trim())).toBe(server.pid);
     }
-    await killTree(server.pid!, "SIGTERM", childPids.updaterPid);
+    const processes = await findProcess("name", "");
+    const retirementPlan = protectedRetirementPlan(processes, server.pid!, childPids.updaterPid);
+    expect(retirementPlan).not.toBeNull();
+    expect(retirementPlan!.pids).toContain(childPids.workerPid);
+    expect(retirementPlan!.pids).not.toContain(childPids.updaterPid);
+    if (process.platform !== "win32") {
+      const workerState = spawnSync("ps", ["-o", "stat=", "-p", String(childPids.workerPid)], { encoding: "utf8" });
+      expect(workerState.status).toBe(0);
+      expect(workerState.stdout.trim()).not.toMatch(/^[ZX]/);
+    }
+    const processesByPid = new Map(processes.map((info: { pid: number }) => [Number(info.pid), info]));
+    const retirementProcesses = retirementPlan!.pids.map(pid => processesByPid.get(pid)).filter(Boolean);
+    expect(retirementProcesses).toHaveLength(retirementPlan!.pids.length);
+    expect(await terminateProcessSet(retirementProcesses, { timeoutMs: 100, killTimeoutMs: 3000 })).toBe(true);
 
     const processState = (pid: number) => {
       const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
@@ -348,21 +390,50 @@ test("upgrade retirement kills the real server tree but preserves its detached u
 });
 
 
-test("an updater already reparented to init is safe for recursive retirement", () => {
-  const processes = [
-    { pid: 1, ppid: 0 },
-    { pid: 100, ppid: 1 },
-    { pid: 200, ppid: 1 },
-  ];
-  expect(protectedProcessIsOutsideTargetTree(processes, 100, 200)).toBe(true);
-  expect(protectedProcessIsOutsideTargetTree([
-    { pid: 0, ppid: 0 },
-    { pid: 100, ppid: 0 },
-    { pid: 200, ppid: 0 },
-  ], 100, 200)).toBe(true);
-  expect(protectedProcessIsOutsideTargetTree(processes, 100, 300)).toBe(false);
-  expect(protectedProcessIsOutsideTargetTree([{ pid: 200, ppid: 100 }], 100, 200)).toBe(false);
-  expect(protectedProcessIsOutsideTargetTree([{ pid: 200, ppid: 999 }], 100, 200)).toBe(false);
+test("upgrade retirement refuses TERM when the live PID no longer matches its snapshot", { timeout: 10_000 }, async () => {
+  const child = spawn(process.execPath, [
+    "-e",
+    "process.on('SIGTERM', () => process.exit(17)); process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  const pid = child.pid!;
+
+  try {
+    await new Promise<void>((resolveReady, rejectReady) => {
+      const timer = setTimeout(() => rejectReady(new Error("child did not become ready")), 3_000);
+      child.once("error", error => {
+        clearTimeout(timer);
+        rejectReady(error);
+      });
+      child.once("exit", code => {
+        clearTimeout(timer);
+        rejectReady(new Error(`child exited before ready (${code})`));
+      });
+      child.stdout.setEncoding("utf8");
+      child.stdout.once("data", () => {
+        clearTimeout(timer);
+        resolveReady();
+      });
+    });
+
+    const found = await findProcess("pid", pid);
+    const snapshot = Array.isArray(found) ? found.find(info => Number(info?.pid) === pid) : undefined;
+    expect(snapshot?.cmd).toBeTruthy();
+    await expect(terminateProcessSet([{
+      ...snapshot!,
+      cmd: `${snapshot!.cmd} changed-after-snapshot`,
+    }], { timeoutMs: 50, killTimeoutMs: 50 })).rejects.toThrow(/拒绝发送 SIGTERM/);
+
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 75));
+    let alive = true;
+    try { process.kill(pid, 0); }
+    catch (error) { if (error.code === "ESRCH") alive = false; }
+    expect(alive).toBe(true);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>(resolveExit => child.once("exit", () => resolveExit()));
+    }
+  }
 });
 
 
