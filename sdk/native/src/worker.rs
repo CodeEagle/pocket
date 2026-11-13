@@ -4774,6 +4774,17 @@ mod tests {
                 "__pocketWorkerChannels.configure(1,0);__pocketWorkerChannels.configure(2,0);",
             )
             .unwrap();
+        });
+        let request_deadline = Instant::now() + Duration::from_secs(2);
+        while server.requests.load(Ordering::Acquire) == 0 {
+            assert!(
+                Instant::now() < request_deadline,
+                "HTTP request was not admitted before UI input: worker_error={:?}",
+                worker.last_error()
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        ui_context.with(|ctx| {
             let status: i32 = ctx
                 .eval("__pocketWorkerChannels.publish(1,new Uint8Array([7]))")
                 .unwrap();
@@ -4901,6 +4912,23 @@ mod tests {
             .position(|event| event.kind == "io.request")
             .expect("recording omitted HTTP request admission");
         let replay_prefix = &events[..=request_index];
+        let prefix_ui_events = replay_prefix
+            .iter()
+            .filter(|event| TraceActor::for_event(Mode::Replay, event) == TraceActor::Ui)
+            .map(|event| {
+                format!(
+                    "{} {:?}/{}/{}",
+                    event.seq,
+                    TraceActor::for_event(Mode::Replay, event),
+                    event.session,
+                    event.kind
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            prefix_ui_events.is_empty(),
+            "HTTP prefix replay is intentionally worker-only, got UI events: {prefix_ui_events:?}"
+        );
         let replay_stop = WorkerTrace::new(Mode::Replay);
         replay_stop.begin_batch(replay_prefix).unwrap();
         let mut active_replay = WorkerRuntime::spawn_traced(
