@@ -367,13 +367,8 @@ jobs:
           name: lantern-guest
           path: demo/assets/apps/lantern
 
-      - name: Read repository Flutter pin
-        id: flutter-pin
-        run: python3 -c 'import json, os; open(os.environ["GITHUB_OUTPUT"], "a").write("version=" + json.load(open(".fvmrc"))["flutter"] + "\n")'
-
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ steps.flutter-pin.outputs.version }}
           channel: stable
           flutter-version-file: .fvmrc
           cache: true
