@@ -1459,6 +1459,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       return {
         value: await this.hostObject("system.runtime.appUpdateStatus", {
           appId,
+          platformRequestId: request.requestId,
           checkLatest: request.params.checkLatest === true,
         }, { timeoutFrames: 60 * simulationHz() }),
       };
@@ -1467,7 +1468,10 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       this.authorizeSystemUIUpdate(request);
       const appId = this.requireInstalled(request.params.appId);
       return {
-        value: await this.hostObject("system.runtime.appUpdatePrepare", { appId }, {
+        value: await this.hostObject("system.runtime.appUpdatePrepare", {
+          appId,
+          platformRequestId: request.requestId,
+        }, {
           timeoutFrames: 180 * simulationHz(),
         }),
       };

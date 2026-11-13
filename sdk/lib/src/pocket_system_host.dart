@@ -8,7 +8,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart' show defaultTargetPlatform;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, visibleForTesting;
 import 'package:flutter/gestures.dart' show VelocityTracker, kTouchSlop;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
@@ -804,7 +805,11 @@ final class PocketSystemHost extends StatefulWidget {
     this.backgroundColor = const Color(0xFF000000),
     this.nativeEdgeExitEnabled = true,
     this.nativeExitRoute,
+    @visibleForTesting this.platformUpdateRequestTimeoutForTesting,
   });
+
+  @visibleForTesting
+  final Duration? platformUpdateRequestTimeoutForTesting;
 
   /// Construct the host from one bootstrap document.
   ///
@@ -2439,7 +2444,12 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         runtime: runtime,
       );
     }
-    final cancellation = _beginMiniAppUpdateOperation();
+    final cancellation = _cancellationForPlatformRequest(
+      params,
+      capability: 'platform.apps.update.status',
+      appId: appId,
+      ownerGeneration: ownerGeneration,
+    );
     PocketUpdateCoordinator? ownedCoordinator;
     Object? error;
     PocketUpdateInspection? inspection;
@@ -2501,7 +2511,12 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
         runtime: runtime,
       );
     }
-    final cancellation = _beginMiniAppUpdateOperation();
+    final cancellation = _cancellationForPlatformRequest(
+      params,
+      capability: 'platform.apps.update.prepare',
+      appId: appId,
+      ownerGeneration: ownerGeneration,
+    );
     PocketUpdateCoordinator? ownedCoordinator;
     Object? error;
     PocketUpdateInspection? inspection;
@@ -2547,6 +2562,42 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   PocketCancellationToken _beginMiniAppUpdateOperation() {
     final cancellation = PocketCancellationToken();
     _miniAppUpdateCancellations.add(cancellation);
+    return cancellation;
+  }
+
+  PocketCancellationToken _cancellationForPlatformRequest(
+    Map<String, dynamic> params, {
+    required String capability,
+    required String appId,
+    required int ownerGeneration,
+  }) {
+    final rawRequestId = params['platformRequestId'];
+    if (rawRequestId == null) {
+      // Older SystemUI bytecode does not forward the platform request id.
+      // Keep its existing operation lifetime, while new bytecode can bind the
+      // native transfer to the exact pending RPC that owns it.
+      return _beginMiniAppUpdateOperation();
+    }
+    if (rawRequestId is! String || rawRequestId.isEmpty) {
+      throw const PocketCapabilityException(
+        'invalid_params',
+        'platformRequestId must be a non-empty string',
+      );
+    }
+    final pending = _pendingRequests[rawRequestId];
+    if (pending == null ||
+        pending.capability != capability ||
+        pending.targetAppId != appId ||
+        pending.systemGeneration != ownerGeneration ||
+        pending.sourceGeneration != pending.source.session.generation ||
+        !_isCurrent(pending.source)) {
+      throw const PocketCapabilityException(
+        'stale_request',
+        'The platform request is no longer pending',
+      );
+    }
+    final cancellation = pending.cancellation ??=
+        _beginMiniAppUpdateOperation();
     return cancellation;
   }
 
@@ -2978,6 +3029,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     if (ok) {
       _pendingRequests.remove(requestId);
       pending.timer.cancel();
+      final cancellation = pending.cancellation;
+      if (cancellation != null) {
+        _finishMiniAppUpdateOperation(cancellation);
+      }
       pending.completer.complete(params['value']);
     } else {
       final error = _readRemoteError(params['error']);
@@ -3042,8 +3097,12 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     final timeout = switch (capability) {
       'platform.apps.open' => const Duration(seconds: 210),
       'platform.apps.prewarm' => const Duration(seconds: 75),
-      'platform.apps.update.prepare' => const Duration(seconds: 180),
-      'platform.apps.update.status' => const Duration(seconds: 60),
+      'platform.apps.update.prepare' =>
+        widget.platformUpdateRequestTimeoutForTesting ??
+            const Duration(seconds: 180),
+      'platform.apps.update.status' =>
+        widget.platformUpdateRequestTimeoutForTesting ??
+            const Duration(seconds: 60),
       _ => _platformRequestTimeout,
     };
     final timer = Timer(timeout, () {
@@ -3060,6 +3119,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     });
     pending = _PendingPlatformRequest(
       requestId: requestId,
+      capability: capability,
+      targetAppId: params['appId'] is String ? params['appId'] as String : null,
       source: source,
       sourceGeneration: source.session.generation,
       systemGeneration: _systemUIInstance.session.generation,
@@ -3397,6 +3458,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     if (!identical(_pendingRequests[pending.requestId], pending)) return;
     _pendingRequests.remove(pending.requestId);
     pending.timer.cancel();
+    final cancellation = pending.cancellation;
+    if (cancellation != null) {
+      _finishMiniAppUpdateOperation(cancellation);
+    }
     if (!pending.completer.isCompleted) pending.completer.completeError(error);
   }
 
@@ -4242,8 +4307,10 @@ final class _NativeBackGesture {
 }
 
 final class _PendingPlatformRequest {
-  const _PendingPlatformRequest({
+  _PendingPlatformRequest({
     required this.requestId,
+    required this.capability,
+    required this.targetAppId,
     required this.source,
     required this.sourceGeneration,
     required this.systemGeneration,
@@ -4252,11 +4319,14 @@ final class _PendingPlatformRequest {
   });
 
   final String requestId;
+  final String capability;
+  final String? targetAppId;
   final _RuntimeInstance source;
   final int sourceGeneration;
   final int systemGeneration;
   final Completer<Object?> completer;
   final Timer timer;
+  PocketCancellationToken? cancellation;
 }
 
 PocketAppConfig _ensureSystemCaps(PocketAppConfig config) {

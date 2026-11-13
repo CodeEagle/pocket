@@ -364,6 +364,155 @@ void main() {
     }
   }, skip: skip);
 
+  testWidgets('a timed-out update prepare releases the resident session', (
+    tester,
+  ) async {
+    updateServer.releaseBuild = 1;
+    final controller = PocketSystemHostController();
+    final configs = _makeConfigs(
+      fixture: fixture,
+      server: server,
+      rootRecordings: rootRecordings,
+      childRecordings: childRecordings,
+      signals: signals,
+      downloadOnOpen: true,
+    );
+    try {
+      await _pumpHost(
+        tester,
+        controller,
+        configs,
+        platformUpdateRequestTimeoutForTesting: const Duration(seconds: 8),
+      );
+      await _waitUntil(
+        tester,
+        () => signals.any((event) => event['event'] == 'prewarmed'),
+        diagnostic: () =>
+            _hostDiagnostics(controller, updateServer, childRecordings),
+      );
+      final root = _findInstance(controller, configs.rootId);
+      await _waitUntil(
+        tester,
+        () {
+          final child = _findInstanceOrNull(controller, configs.childId);
+          return child != null &&
+              child.firstFrameReady &&
+              child.session.active?.build == 1;
+        },
+        diagnostic: () =>
+            _hostDiagnostics(controller, updateServer, childRecordings),
+      );
+      await _sendPointer(tester, root.session, x: 72);
+      await _waitUntil(
+        tester,
+        () {
+          final child = _findInstanceOrNull(controller, configs.childId);
+          return child != null &&
+              child.isPresented &&
+              child.session.stage == 'ready';
+        },
+        diagnostic: () =>
+            _hostDiagnostics(controller, updateServer, childRecordings),
+      );
+      await tester.runAsync(
+        () => _findInstance(
+          controller,
+          configs.childId,
+        ).session.inspectUpdate(checkLatest: false),
+      );
+      updateServer.releaseBuild = 2;
+      updateServer.beginSlowLatestBody();
+
+      final timeoutWindowStarted = DateTime.now();
+      await _sendPointer(tester, root.session, x: 36);
+      await _waitUntil(
+        tester,
+        () => updateServer.slowLatestStarted,
+        timeout: const Duration(seconds: 5),
+        diagnostic: () =>
+            _hostDiagnostics(controller, updateServer, childRecordings),
+      );
+
+      // Keep the real HTTP response making progress in real time. The test
+      // only shortens the native pending deadline; the transport and cancel
+      // path remain the production implementation.
+      Future<void> advanceSlowStream() async {
+        await tester.runAsync(() async {
+          if (updateServer.slowChunkReady) {
+            updateServer.releaseSlowLatestChunk();
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      for (var chunk = 0; chunk < 10; chunk++) {
+        await advanceSlowStream();
+      }
+
+      // Let the native pending deadline expire while keeping the real HTTP
+      // body active. The same healthy resident session must leave its busy
+      // state after cancellation without committing a partial candidate.
+      final prepareRepliesBefore = signals
+          .where(
+            (event) =>
+                event['event'] == 'update-prepare-error' ||
+                event['event'] == 'update-prepared',
+          )
+          .length;
+      // `Timer` in the native host is a real root-zone timer; WidgetTester
+      // pumps alone do not advance it. Each iteration drains one actual HTTP
+      // chunk and waits 100ms in `runAsync`, keeping the response active while
+      // the shortened native deadline elapses in real time.
+      for (var chunk = 0; chunk < 200; chunk++) {
+        final prepareReplies = signals.where(
+          (event) =>
+              event['event'] == 'update-prepare-error' ||
+              event['event'] == 'update-prepared',
+        );
+        if (prepareReplies.length > prepareRepliesBefore) {
+          break;
+        }
+        await advanceSlowStream();
+      }
+      final timeoutWindowElapsed = DateTime.now().difference(
+        timeoutWindowStarted,
+      );
+      final prepareErrors = signals
+          .where((event) => event['event'] == 'update-prepare-error')
+          .toList(growable: false);
+      expect(prepareErrors, isNotEmpty, reason: 'signals=$signals');
+      expect(
+        timeoutWindowElapsed,
+        greaterThanOrEqualTo(const Duration(seconds: 7)),
+        reason: 'the native request timer must elapse in real wall time',
+      );
+      expect(
+        '${prepareErrors.first['message']}',
+        contains('did not answer the platform request in time'),
+      );
+      await _waitUntil(
+        tester,
+        () =>
+            _findInstance(controller, configs.childId).session.stage == 'error',
+        timeout: const Duration(seconds: 5),
+        diagnostic: () =>
+            _hostDiagnostics(controller, updateServer, childRecordings),
+      );
+
+      final timedOutChild = _findInstance(controller, configs.childId);
+      final inspection = await tester.runAsync(
+        () => timedOutChild.session.inspectUpdate(checkLatest: false),
+      );
+      expect(inspection, isNotNull);
+      expect(inspection!.active?.build, 1);
+      expect(inspection.staged, isNull);
+    } finally {
+      updateServer.slowLatestBody = false;
+      await _closeHost(tester, controller);
+    }
+  }, skip: skip);
+
   testWidgets('same signed build in background does not remount the child', (
     tester,
   ) async {
@@ -688,8 +837,9 @@ _MiniUpdateConfigs _makeConfigs({
 Future<void> _pumpHost(
   WidgetTester tester,
   PocketSystemHostController controller,
-  _MiniUpdateConfigs configs,
-) async {
+  _MiniUpdateConfigs configs, {
+  Duration? platformUpdateRequestTimeoutForTesting,
+}) async {
   await tester.pumpWidget(
     Directionality(
       textDirection: TextDirection.ltr,
@@ -700,6 +850,8 @@ Future<void> _pumpHost(
                 configs.childId: configs.child,
               },
               controller: controller,
+              platformUpdateRequestTimeoutForTesting:
+                  platformUpdateRequestTimeoutForTesting,
             )
           : PocketSystemHost.fromHostConfig(
               config: configs.hostConfig!,
@@ -871,6 +1023,7 @@ final class _MiniUpdateServer {
   int rootReleaseBuild = 1;
   int releaseBuild = 2;
   bool holdLatest = false;
+  bool slowLatestBody = false;
   bool failLatest = false;
   int latestRequests = 0;
   int fileRequests = 0;
@@ -879,12 +1032,55 @@ final class _MiniUpdateServer {
   int openResponses = 0;
   final List<String> missingPaths = <String>[];
   Completer<void>? _release;
+  Completer<void>? _slowLatestStarted;
+  Completer<void>? _slowChunkGate;
 
   bool get latestHeld => _release != null && !_release!.isCompleted;
+  bool get slowLatestStarted => _slowLatestStarted?.isCompleted == true;
+  bool get slowChunkReady =>
+      _slowChunkGate != null && !_slowChunkGate!.isCompleted;
 
   void releaseLatest() {
     final release = _release;
     if (release != null && !release.isCompleted) release.complete();
+  }
+
+  void beginSlowLatestBody() {
+    slowLatestBody = true;
+    _slowLatestStarted = Completer<void>();
+    _slowChunkGate = null;
+  }
+
+  void releaseSlowLatestChunk() {
+    final gate = _slowChunkGate;
+    if (gate == null || gate.isCompleted) {
+      throw StateError('No slow latest response chunk is waiting');
+    }
+    gate.complete();
+  }
+
+  Future<void> _streamSlowLatestBody(
+    HttpRequest request,
+    Uint8List bytes,
+  ) async {
+    request.response
+      ..bufferOutput = false
+      ..contentLength = bytes.length;
+    if (!(_slowLatestStarted?.isCompleted ?? true)) {
+      _slowLatestStarted!.complete();
+    }
+    var offset = 0;
+    while (offset < bytes.length) {
+      final gate = _slowChunkGate = Completer<void>();
+      await gate.future;
+      try {
+        request.response.add(<int>[bytes[offset++]]);
+        await request.response.flush();
+      } on Object {
+        return;
+      }
+    }
+    await request.response.close();
   }
 
   void configureHostConfig(int port) {
@@ -1180,6 +1376,10 @@ final class _MiniUpdateServer {
       fileRequests++;
       servedPackageDirectories.add(packageDirectory);
       final bytes = await file.readAsBytes();
+      if (relative == 'latest.json' && slowLatestBody) {
+        await _streamSlowLatestBody(request, bytes);
+        return;
+      }
       request.response.contentLength = bytes.length;
       request.response.add(bytes);
       await request.response.close();

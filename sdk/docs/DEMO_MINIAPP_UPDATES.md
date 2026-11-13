@@ -24,6 +24,12 @@ The Demo Guest input regression drives the Home package-management entry and the
 
 The real Flutter/native FFI regression additionally drives signed metadata inspection and package preparation through the SystemUI Guest. It verifies that inspection fetches no blobs, preparation stages build 2 while build 1 stays active, and the next open activates build 2. The resident-instance regression separately verifies changed frame output and input-driven frame changes after a same-version build update.
 
+## Cancellation on platform request timeout
+
+The retained parent update sources above cover the older syslib/AOT update path, not native cancellation of a MiniApp package request. SystemUI now forwards the originating `platformRequestId` for update status and prepare calls. The Flutter boundary associates a cancellation token only with that still-pending request after checking its capability, target app and SystemUI generation; timeout, response completion and owner invalidation cancel that token, which reaches the existing update coordinator and HTTP body stream. A legacy SystemUI guest without the ID keeps its previous request lifetime for compatibility; rebuild and republish SystemUI bytecode to enable timeout-bound cancellation. The resident `prepareOpen` operation is not covered by this request-ID change.
+
+The FFI regression runs a real SystemUI QJBC and healthy resident child against a real slow HTTP response. It advances response chunks every 100ms, confirms the 8-second native request timeout in wall time, then verifies the same session leaves its update-error state and `inspectUpdate(checkLatest: false)` succeeds with build 1 still active and no staged package. A local ablation that omitted `platformRequestId` reproduced the stuck `checking` state and failed that assertion. The timeout duration is exposed only as a `@visibleForTesting` host parameter; the test otherwise uses the production cancellation token, transport and coordinator.
+
 ## Open deadline and cleanup
 
 The existing HostBridge tick clock provides one 180-second frame budget starting when an open request enters the serial queue. Runtime creation, preparation, first-frame admission and the open transaction's lifecycle transports use the smaller of their existing request limit and the remaining budget. The outer platform request keeps its 210-second limit to allow failure cleanup. This does not introduce a parallel updater or another wall-clock timer in the normal bridge path.

@@ -168,6 +168,8 @@ async function prepareChildUpdate(): Promise<void> {
       latestBuild: status.latestBuild,
       stagedVersion: status.stagedVersion,
       stagedBuild: status.stagedBuild,
+      stage: status.stage,
+      lastError: status.lastError,
     });
   } catch (error) {
     await host.request("fixture.signal", {
