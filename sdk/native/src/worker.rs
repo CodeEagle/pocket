@@ -1026,6 +1026,8 @@ impl WorkerState {
     }
 
     fn trace_failure(&self, error: String) {
+        #[cfg(test)]
+        eprintln!("Worker trace failure (session={:?}): {error}", self.session);
         *self
             .errors
             .lock()
@@ -2997,6 +2999,17 @@ unsafe extern "C" fn runner_wait(context: *mut c_void, deadline: u64) {
                             .unwrap_or_else(|poison| poison.into_inner())
                             .exited
                     {
+                        let runner = state.runner.load(Ordering::Acquire);
+                        if !runner.is_null() && unsafe { pocket_worker_runner_failed(runner) } != 0
+                        {
+                            // A faulted C runner no longer reaches the replay
+                            // trace gate; its fault-retention loop waits until
+                            // the Host stops it. Preserve the recorded fault
+                            // and release that loop rather than treating it as
+                            // a stop-admitted turn.
+                            unsafe { pocket_worker_runner_stop(runner) };
+                            return;
+                        }
                         // The C runner may call wait_until after finishing a
                         // stop-admitted replay turn, before its next trace gate
                         // can consume worker.exit. A pulse sent by the Host
@@ -4457,7 +4470,15 @@ mod tests {
             }
             tape
         };
-        let admitted_tape = resequence(vec![
+        let boot_admitted_tape = resequence(vec![
+            bootstrap.clone(),
+            scheduler_stop.clone(),
+            boot_begin.clone(),
+            boot_facts.clone(),
+            boot_end.clone(),
+            worker_exit.clone(),
+        ]);
+        let idle_admitted_tape = resequence(vec![
             bootstrap.clone(),
             boot_begin.clone(),
             boot_facts.clone(),
@@ -4468,20 +4489,43 @@ mod tests {
             idle_end,
             worker_exit.clone(),
         ]);
-        let no_turn_tape = resequence(vec![
-            bootstrap,
-            boot_begin,
-            boot_facts,
-            boot_end,
-            scheduler_stop,
+        let mut faulted_boot_begin = boot_begin.clone();
+        faulted_boot_begin.data["sequence"] = serde_json::json!(boot_sequence + 7);
+        let fault_tape = resequence(vec![
+            bootstrap.clone(),
+            scheduler_stop.clone(),
+            faulted_boot_begin,
             worker_exit.clone(),
         ]);
+        let no_turn_tape = resequence(vec![bootstrap, scheduler_stop, worker_exit]);
 
-        for (tape, expected_turns, hold_stop_store, hold_runner_wait) in [
-            (admitted_tape.clone(), 2usize, false, false),
-            (admitted_tape, 2usize, false, true),
-            (no_turn_tape.clone(), 1usize, false, false),
-            (no_turn_tape, 1usize, true, false),
+        for (
+            tape,
+            expected_turns,
+            hold_stop_store,
+            hold_runner_wait,
+            skip_before_step,
+            expect_fault,
+        ) in [
+            (
+                boot_admitted_tape,
+                Some(1usize),
+                false,
+                false,
+                0usize,
+                false,
+            ),
+            (
+                no_turn_tape.clone(),
+                Some(0usize),
+                false,
+                false,
+                0usize,
+                false,
+            ),
+            (no_turn_tape, Some(0usize), true, false, 0usize, false),
+            (idle_admitted_tape, Some(2usize), false, true, 1usize, false),
+            (fault_tape, None, false, false, 0usize, true),
         ] {
             let replay = WorkerTrace::new(Mode::Replay);
             replay.begin_batch(&tape).unwrap();
@@ -4492,7 +4536,7 @@ mod tests {
             if hold_runner_wait {
                 replay_barrier.hold_runner_wait();
             }
-            replay_barrier.skip_before_step(1);
+            replay_barrier.skip_before_step(skip_before_step);
             let mut runtime = stop_boundary_worker(&bytecode, Arc::clone(&replay), session);
             runtime.wait_ready(Duration::from_secs(2)).unwrap();
             assert!(
@@ -4575,10 +4619,50 @@ mod tests {
                     "stop-admitted idle C step did not return to the worker.exit gate: reached_runner_wait={reached_runner_wait} stop_requested={stop_requested} stop_pulse_consumed={stop_pulse_consumed} frontier={next_event:?} exited={exited} error={:?}",
                     runtime.last_error()
                 );
+            } else if expect_fault {
+                let state = Arc::clone(&runtime.state);
+                let stop_thread = thread::spawn(move || {
+                    runtime.request_stop_and_wait();
+                    runtime
+                });
+                let (lock, cv) = &state.lifecycle;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut lifecycle = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                while !lifecycle.exited && Instant::now() < deadline {
+                    let (next, _) = cv
+                        .wait_timeout(
+                            lifecycle,
+                            deadline.saturating_duration_since(Instant::now()),
+                        )
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    lifecycle = next;
+                }
+                let exited = lifecycle.exited;
+                drop(lifecycle);
+                if !exited {
+                    let runner = state.runner.load(Ordering::Acquire);
+                    if !runner.is_null() {
+                        unsafe { pocket_worker_runner_stop(runner) };
+                    }
+                    state.pulse.signal();
+                }
+                runtime = stop_thread.join().unwrap();
+                assert!(exited, "faulted C runner did not exit after Host stop");
             } else {
                 runtime.request_stop_and_wait();
             }
             runtime.destroy_and_join().unwrap();
+            if expect_fault {
+                let error = runtime.last_error().unwrap_or_default();
+                assert!(
+                    error.contains("Worker replay turn admission identity differs"),
+                    "replay fault must remain visible after stopping the C runner: {error}"
+                );
+                drop(replay_barrier);
+                let replay_error = replay.finish_batch().unwrap_err();
+                assert!(replay_error.contains("admission identity differs"));
+                continue;
+            }
             assert_eq!(runtime.last_error(), None);
             if hold_runner_wait {
                 assert!(runtime.is_stopped());
@@ -4600,14 +4684,16 @@ mod tests {
             drop(replay_barrier);
             let consumed = replay.finish_batch().unwrap();
             assert_eq!(consumed, tape);
-            assert_eq!(
-                consumed
-                    .iter()
-                    .filter(|event| event.kind == "turn.begin")
-                    .count(),
-                expected_turns,
-                "replay must consume exactly the turn admission recorded in its tape"
-            );
+            if let Some(expected_turns) = expected_turns {
+                assert_eq!(
+                    consumed
+                        .iter()
+                        .filter(|event| event.kind == "turn.begin")
+                        .count(),
+                    expected_turns,
+                    "replay must consume exactly the turn admission recorded in its tape"
+                );
+            }
         }
     }
 
