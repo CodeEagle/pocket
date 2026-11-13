@@ -8,8 +8,8 @@
  * entryFormat=quickjs-bytecode.
  */
 
-import { constants as fsConstants, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { createPublicKey, randomUUID } from "node:crypto";
+import { constants as fsConstants, existsSync, lstatSync, readFileSync, realpathSync, watch as watchFs, type FSWatcher } from "node:fs";
+import { createHash, createPublicKey, randomUUID } from "node:crypto";
 import {
   cp,
   open,
@@ -19,7 +19,9 @@ import {
   readFile,
   readdir,
   rm,
+  rmdir,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -115,12 +117,25 @@ export type ArtifactInfo = {
   resources: string;
 };
 
+export type BuildDiagnostic = {
+  /** Project-relative, "/"-separated; never absolute. */
+  file: string;
+  /** 1-based. */
+  line: number;
+  /** 1-based. */
+  column: number;
+  severity: "error" | "warning";
+  message: string;
+};
+
 export type EditorStatus = {
   id: string;
   revision: number;
   builtRevision: number | null;
   busy: boolean;
   error?: string;
+  /** Present only while `error` is set by a failed build. */
+  diagnostics?: BuildDiagnostic[];
   logs: string[];
   startedAt?: string;
   finishedAt?: string;
@@ -171,6 +186,8 @@ type BuildRunner = (input: {
   outDir: string;
   config: EditorConfig;
   log: (line: string) => void;
+  /** Aborts when the Studio user cancels the build. */
+  signal?: AbortSignal;
 }) => Promise<BuildOutput>;
 
 export type StartEditorOptions = {
@@ -201,6 +218,7 @@ type EditorState = {
   builtRevision: number | null;
   busy: boolean;
   error?: string;
+  diagnostics?: BuildDiagnostic[];
   logs: string[];
   startedAt?: string;
   finishedAt?: string;
@@ -779,6 +797,129 @@ async function readJsonFile<T>(path: string, fallback?: T): Promise<T> {
   }
 }
 
+
+const maxChunkBytes = 131072;
+const maxOpenUploads = 8;
+const uploadIdleMs = 10 * 60_000;
+const maxWatchClients = 16;
+const maxBuildEventClients = 32;
+const watchDebounceMs = 100;
+const sha256Cache = new Map<string, string>();
+
+function httpFailure(message: string, status: number): never {
+  return pathFailure(message, status);
+}
+
+function parseNonNegativeInteger(value: unknown, label: string, fallback?: number): number {
+  if (value === undefined || value === null || value === "") {
+    if (fallback !== undefined) return fallback;
+    return httpFailure(`${label} is required`, 400);
+  }
+  const number = typeof value === "number" ? value : /^\d{1,16}$/.test(String(value)) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(number) || number < 0) return httpFailure(`${label} must be a non-negative integer`, 400);
+  return number;
+}
+
+function decodeBase64Strict(value: unknown, label: string): Buffer {
+  if (typeof value !== "string" || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+    return httpFailure(`${label} must be canonical base64`, 400);
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) return httpFailure(`${label} must be canonical base64`, 400);
+  return bytes;
+}
+
+function parseSha256(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-fA-F]{64}$/.test(value)) return httpFailure("sha256 must be 64 hex characters", 400);
+  return value.toLowerCase();
+}
+
+/** Open a validated project file read-only without following a final symlink. */
+async function openProjectFileForRead(path: string): Promise<import("node:fs/promises").FileHandle> {
+  return open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+}
+
+async function wholeFileSha256(handle: import("node:fs/promises").FileHandle, key: string): Promise<string> {
+  const cached = sha256Cache.get(key);
+  if (cached) return cached;
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(65536);
+  for (let position = 0; ;) {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    if (bytesRead === 0) break;
+    hash.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  const digest = hash.digest("hex");
+  if (sha256Cache.size >= 64) sha256Cache.delete(sha256Cache.keys().next().value!);
+  sha256Cache.set(key, digest);
+  return digest;
+}
+
+/** Watch-event path filter: the same trees/files the Studio file API exposes. */
+function watchablePath(projectDir: string, relativePath: string): { relativePath: string; kind: "file" | "directory" } | undefined {
+  const normalized = relativePath.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  if (!normalized || segments.some((part) => !part || part === "." || part === ".." || part.startsWith(".") ||
+      ignoredProjectInputDirectories.has(part.toLowerCase()) || protectedDirectoryNames.has(part.toLowerCase()))) return undefined;
+  const leaf = segments.at(-1)!;
+  const editable = editableFilePattern.test(leaf) && !protectedFilePattern.test(leaf);
+  const info = lstatIfExists(join(projectDir, normalized));
+  try {
+    if (!info) {
+      // Already gone: classify by name. A dotted non-editable leaf was a file we never expose.
+      if (editable) return { relativePath: normalized, kind: "file" };
+      return leaf.includes(".") ? undefined : { relativePath: normalized, kind: "directory" };
+    }
+    if (info.isSymbolicLink()) return undefined;
+    if (info.isDirectory()) {
+      safeProjectFile(projectDir, normalized, { isDirectory: true });
+      return { relativePath: normalized, kind: "directory" };
+    }
+    if (info.isFile() && editable) {
+      safeProjectFile(projectDir, normalized);
+      return { relativePath: normalized, kind: "file" };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function sseResponse(request: Request, attach: (send: (value: unknown) => void, close: () => void) => () => void): Response {
+  const encoder = new TextEncoder();
+  let detach: (() => void) | undefined;
+  let closed = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        detach?.();
+        try { controller.close(); } catch { /* already closed */ }
+      };
+      const send = (value: unknown): void => {
+        if (closed) return;
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`)); } catch { close(); }
+      };
+      detach = attach(send, close);
+      request.signal.addEventListener("abort", close, { once: true });
+    },
+    cancel() {
+      closed = true;
+      detach?.();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-store, must-revalidate",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
 async function parseJsonBody(request: Request, maxBytes = maxJsonBytes): Promise<Record<string, unknown>> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) {
@@ -1078,9 +1219,33 @@ async function loadState(workspace: Workspace, id: string): Promise<EditorState>
   return { ...state, busy: false };
 }
 
+/**
+ * Push channel for build/watch SSE streams. Every state mutation already goes
+ * through pushLog() and saveState(), so those two emit; there is no timer.
+ */
+type StateBusEvent =
+  | { type: "status"; status: EditorStatus }
+  | { type: "log"; line: string }
+  | { type: "done"; ok: boolean; builtRevision: number | null; diagnostics: BuildDiagnostic[] };
+const stateSubscribers = new WeakMap<EditorState, Set<(event: StateBusEvent) => void>>();
+
+function emitState(state: EditorState, event: StateBusEvent): void {
+  for (const listener of [...(stateSubscribers.get(state) ?? [])]) {
+    try { listener(event); } catch { /* a broken stream must not break a mutation */ }
+  }
+}
+
+function subscribeState(state: EditorState, listener: (event: StateBusEvent) => void): () => void {
+  let set = stateSubscribers.get(state);
+  if (!set) stateSubscribers.set(state, set = new Set());
+  set.add(listener);
+  return () => { set.delete(listener); };
+}
+
 async function saveState(workspace: Workspace, id: string, state: EditorState): Promise<void> {
   await mkdir(workspace.states, { recursive: true });
   await writeFile(join(workspace.states, `${id}.json`), JSON.stringify(state, null, 2) + "\n");
+  if (stateSubscribers.get(state)?.size) emitState(state, { type: "status", status: publicStatus(id, state) });
 }
 
 function publicStatus(id: string, state: EditorState): EditorStatus {
@@ -1090,6 +1255,7 @@ function publicStatus(id: string, state: EditorState): EditorStatus {
     builtRevision: state.builtRevision,
     busy: state.busy,
     ...(state.error ? { error: state.error } : {}),
+    ...(state.error && state.diagnostics ? { diagnostics: state.diagnostics } : {}),
     logs: state.logs.slice(-200),
     ...(state.startedAt ? { startedAt: state.startedAt } : {}),
     ...(state.finishedAt ? { finishedAt: state.finishedAt } : {}),
@@ -1099,8 +1265,63 @@ function publicStatus(id: string, state: EditorState): EditorStatus {
 }
 
 function pushLog(state: EditorState, line: string): void {
-  state.logs.push(line.slice(0, 4096));
+  const clipped = line.slice(0, 4096);
+  state.logs.push(clipped);
   if (state.logs.length > 200) state.logs.splice(0, state.logs.length - 200);
+  if (stateSubscribers.get(state)?.size) emitState(state, { type: "log", line: clipped });
+}
+
+/**
+ * Turn compiler output into structured diagnostics. Formats observed from the
+ * pinned toolchain: Babel parse errors ("SyntaxError: <file>: msg (L:C)",
+ * 0-based column), `bun build` errors ("error: msg" + "    at <file>:L:C"), and
+ * the generic "<file>:L:C: error: msg". Files outside the project are dropped
+ * and the project directory is stripped from messages.
+ */
+function parseBuildDiagnostics(lines: string[], projectDir: string): BuildDiagnostic[] {
+  const roots = [resolve(projectDir)];
+  try { roots.push(realpathSync(projectDir)); } catch { /* project vanished */ }
+  const toRelative = (file: string): string | undefined => {
+    const candidate = isAbsolute(file) ? file : resolve(projectDir, file);
+    for (const base of roots) {
+      const rel = relative(base, candidate);
+      if (rel && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("..\\") && !isAbsolute(rel)) return rel.replaceAll("\\", "/");
+    }
+    return undefined;
+  };
+  const clean = (message: string): string => {
+    let out = message;
+    for (const base of roots) out = out.replaceAll(`${base}/`, "").replaceAll(`${base}\\`, "");
+    return out.trim().slice(0, 1000);
+  };
+  const out: BuildDiagnostic[] = [];
+  const seen = new Set<string>();
+  const add = (file: string, line: number, column: number, severity: "error" | "warning", message: string): void => {
+    const rel = toRelative(file);
+    if (!rel || out.length >= 100 || !Number.isSafeInteger(line) || line < 1) return;
+    const diagnostic = { file: rel, line, column: Math.max(1, column), severity, message: clean(message) };
+    const key = JSON.stringify(diagnostic);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(diagnostic);
+  };
+  const plain = lines.map((line) => line.replace(/\u001b\[[0-9;]*m/g, ""));
+  for (let index = 0; index < plain.length; index += 1) {
+    const line = plain[index]!;
+    const babel = /^\w*Error: ((?:[A-Za-z]:)?[^:]+?): (.+) \((\d+):(\d+)\)$/.exec(line);
+    if (babel) { add(babel[1]!, Number(babel[3]), Number(babel[4]) + 1, "error", babel[2]!); continue; }
+    const colon = /^((?:[A-Za-z]:)?[^:\s][^:]*):(\d+):(\d+): (error|warning|ERROR|WARNING):? (.*)$/.exec(line);
+    if (colon) { add(colon[1]!, Number(colon[2]), Number(colon[3]), colon[4]!.toLowerCase() as "error" | "warning", colon[5]!); continue; }
+    const bun = /^(error|warning): (.*)$/.exec(line);
+    if (bun) {
+      for (let next = index + 1; next < Math.min(plain.length, index + 6); next += 1) {
+        const at = /^\s+at ((?:[A-Za-z]:)?[^():]+?):(\d+):(\d+)$/.exec(plain[next]!);
+        if (at) { add(at[1]!, Number(at[2]), Number(at[3]), bun[1] as "error" | "warning", bun[2]!); break; }
+        if (/^(error|warning): /.test(plain[next]!)) break;
+      }
+    }
+  }
+  return out;
 }
 
 async function runProcess(command: string[], cwd: string, log: (line: string) => void): Promise<void> {
@@ -1120,6 +1341,7 @@ async function realBuild(input: Parameters<BuildRunner>[0]): Promise<BuildOutput
     outDir: input.outDir,
     tickHz: input.config.tickHz,
     log: input.log,
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   const bytecodeMetadata = await readJsonFile<Record<string, unknown>>(built.metadata);
   if (bytecodeMetadata.entryFormat !== "quickjs-bytecode" || typeof bytecodeMetadata.runtimeAbi !== "string" || !bytecodeMetadata.runtimeAbi) {
@@ -1212,7 +1434,8 @@ async function stageGeneratedPreviewApplications(
   return entries.length;
 }
 
-async function buildProject(workspace: Workspace, id: string, state: EditorState, config: EditorConfig, runner: BuildRunner): Promise<void> {
+async function buildProject(workspace: Workspace, id: string, state: EditorState, config: EditorConfig, runner: BuildRunner, signal?: AbortSignal, captured?: string[]): Promise<void> {
+  signal?.throwIfAborted();
   const revision = state.revision;
   const projectDir = projectDirectory(workspace, id);
   // All build configuration paths are checked before parsing. The effective
@@ -1238,7 +1461,11 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
   const stagingDir = await mkdtemp(join(revisionRoot, ".staging-"));
   const temp = await mkdtemp(join(tmpdir(), "pocket-editor-build-"));
   try {
-    const output = await runner({ id, projectDir, outDir: temp, config, log: (line) => pushLog(state, line) });
+    const output = await runner({
+      id, projectDir, outDir: temp, config, signal,
+      log: (line) => { pushLog(state, line); if (captured && captured.length < 20000) captured.push(line); },
+    });
+    signal?.throwIfAborted();
     const copy = async (name: string, source: string) => { await cp(source, join(stagingDir, name)); };
     await copy("app.js", output.appJs);
     await copy("app.pak", output.pak);
@@ -1310,6 +1537,7 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
       generatedAt: now(),
     };
     await writeFile(join(stagingDir, "build.json"), JSON.stringify(buildInfo, null, 2) + "\n");
+    signal?.throwIfAborted();
     const backupDir = `${buildDir}.backup-${randomUUID()}`;
     let movedExisting = false;
     try {
@@ -1348,6 +1576,17 @@ async function buildProject(workspace: Workspace, id: string, state: EditorState
   }
 }
 
+const buildAborts = new WeakMap<EditorState, AbortController>();
+const buildSettled = new WeakMap<EditorState, Promise<void>>();
+
+/** Abort the running/queued build of this project. False when none is active. */
+function cancelBuild(state: EditorState): boolean {
+  const controller = buildAborts.get(state);
+  if (!controller || !state.busy || controller.signal.aborted) return false;
+  controller.abort();
+  return true;
+}
+
 function queueBuild(
   workspace: Workspace,
   id: string,
@@ -1358,27 +1597,43 @@ function queueBuild(
   if (state.busy) return;
   state.busy = true;
   state.error = undefined;
+  state.diagnostics = undefined;
   state.startedAt = now();
-  void (async () => {
+  const controller = new AbortController();
+  buildAborts.set(state, controller);
+  const projectDir = projectDirectory(workspace, id);
+  buildSettled.set(state, (async () => {
     try {
       do {
         const revision = state.revision;
-        const config = await loadConfig(projectDirectory(workspace, id), id);
-        pushLog(state, `build started: revision ${revision}`);
-        await saveState(workspace, id, state);
+        const captured: string[] = [];
         try {
-          await buildProject(workspace, id, state, config, runner);
+          controller.signal.throwIfAborted();
+          const config = await loadConfig(projectDir, id);
+          pushLog(state, `build started: revision ${revision}`);
+          await saveState(workspace, id, state);
+          await buildProject(workspace, id, state, config, runner, controller.signal, captured);
+          state.diagnostics = undefined;
         } catch (error) {
-          state.error = error instanceof Error ? error.message : String(error);
-          pushLog(state, `ERROR: ${state.error}`);
+          if (controller.signal.aborted) {
+            state.error = "build cancelled";
+            state.diagnostics = [];
+            pushLog(state, "build cancelled");
+          } else {
+            state.error = error instanceof Error ? error.message : String(error);
+            state.diagnostics = parseBuildDiagnostics(captured, projectDir);
+            pushLog(state, `ERROR: ${state.error}`);
+          }
         }
       } while (state.revision !== state.builtRevision && !state.error);
     } finally {
+      buildAborts.delete(state);
       state.busy = false;
       state.finishedAt = now();
-      await saveState(workspace, id, state);
+      try { await saveState(workspace, id, state); } catch { /* reported by the next mutation */ }
+      emitState(state, { type: "done", ok: !state.error, builtRevision: state.builtRevision, diagnostics: state.diagnostics ?? [] });
     }
-  })();
+  })());
 }
 
 async function readArtifact(workspace: Workspace, id: string, file: string, state: EditorState): Promise<Uint8Array | undefined> {
@@ -2198,6 +2453,31 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const backupTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let backupSchedulerStopped = false;
   const publishSlots = new Set<string>();
+  type UploadSession = { projectId: string; path: string; totalBytes: number; sha256: string; chunks: Buffer[]; received: number; timer: ReturnType<typeof setTimeout> };
+  const uploads = new Map<string, UploadSession>();
+  const dropUpload = (uploadId: string): void => {
+    const session = uploads.get(uploadId);
+    if (session) clearTimeout(session.timer);
+    uploads.delete(uploadId);
+  };
+  const touchUpload = (uploadId: string, session: UploadSession): void => {
+    clearTimeout(session.timer);
+    session.timer = setTimeout(() => dropUpload(uploadId), uploadIdleMs);
+    session.timer.unref?.();
+  };
+  type WatchClient = { send: (value: unknown) => void; close: () => void; revision: number };
+  type ProjectWatch = { watcher: FSWatcher; clients: Set<WatchClient>; pending: Map<string, boolean>; timer?: ReturnType<typeof setTimeout>; unsubscribe: () => void };
+  const projectWatches = new Map<string, ProjectWatch>();
+  let watchClientCount = 0;
+  let buildEventClientCount = 0;
+  const closeProjectWatch = (id: string): void => {
+    const entry = projectWatches.get(id);
+    if (!entry) return;
+    projectWatches.delete(id);
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.unsubscribe();
+    try { entry.watcher.close(); } catch { /* closed */ }
+  };
   const runner = options.buildRunner ?? realBuild;
   if (!appIdPattern.test(updateHostVersion)) throw new Error("Editor update host version is invalid");
   if (updatePackageVersion !== undefined && !appIdPattern.test(updatePackageVersion)) throw new Error("Editor update package version is invalid");
@@ -4064,15 +4344,17 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
         // Reserve before any awaited validation/body parsing. Manager-level
         // reservations alone cannot exclude a simultaneous source/AI request.
         // Preview input and cancellation remain available during long tasks.
-        if (["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") {
+        // DELETE of a file/folder mutates the project like PUT; other DELETE routes keep their own guards.
+        const isWriteMethod = ["PUT", "POST", "PATCH"].includes(method) || (method === "DELETE" && (parts[3] === "files" || parts[3] === "folders"));
+        if (isWriteMethod && parts[3] !== "preview") {
           if (projectWrites.has(id)) return failure("Another project operation is starting; retry when it completes", 409);
           projectWrites.add(id);
           releaseProjectWrite = () => projectWrites.delete(id);
         }
         const state = await getState(id);
-        if (codex.isBusy(id) && ["PUT", "POST", "PATCH"].includes(method) && !["codex", "preview"].includes(parts[3])) return failure("Codex is editing this project; wait or cancel its turn before saving/building", 409);
-        if (wechat.isBuilding(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("WeChat build is using this project; stop it before editing/building", 409);
-        if (deploymentWriting(id) && ["PUT", "POST", "PATCH"].includes(method) && parts[3] !== "preview") return failure("Device build is using this project; wait or cancel it before editing/building", 409);
+        if (codex.isBusy(id) && isWriteMethod && !["codex", "preview"].includes(parts[3])) return failure("Codex is editing this project; wait or cancel its turn before saving/building", 409);
+        if (wechat.isBuilding(id) && isWriteMethod && parts[3] !== "preview") return failure("WeChat build is using this project; stop it before editing/building", 409);
+        if (deploymentWriting(id) && isWriteMethod && parts[3] !== "preview") return failure("Device build is using this project; wait or cancel it before editing/building", 409);
         if (parts[0] === "api" && parts[1] === "projects") {
           if (parts[3] === "publish-targets" && parts.length === 4 && method === "GET") {
             const requestedChannel = new URL(request.url).searchParams.get("channel") ?? "test";
@@ -4278,6 +4560,241 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
               return json({ path: "app.tsx", bytes: Buffer.byteLength(source), revision: state.revision });
             }
           }
+          // ---- Studio filesystem / transfer / watch / build-control routes (additive) ----
+          const commitMutation = async (message: string): Promise<void> => {
+            state.revision += 1;
+            state.error = undefined;
+            state.diagnostics = undefined;
+            state.publish = undefined;
+            pushLog(state, `${message} (revision ${state.revision})`);
+            await saveState(workspace, id, state);
+          };
+          if (parts[3] === "stat" && method === "GET" && parts.length > 4) {
+            const relativePath = parts.slice(4).join("/");
+            let resolvedPath: string;
+            let kind: "file" | "directory" = "directory";
+            let editable = true;
+            try {
+              resolvedPath = safeProjectFile(projectDir(id), relativePath, { isDirectory: true });
+            } catch (error) {
+              if ((error as Error).message !== "path is not a directory") throw error;
+              // Validation (names, protected files, symlinks) has already passed; only the type differs.
+              kind = "file";
+              resolvedPath = safeChild(projectDir(id), relativePath.replaceAll("\\", "/"));
+              try { safeProjectFile(projectDir(id), relativePath); } catch { editable = false; }
+            }
+            const info = lstatIfExists(resolvedPath);
+            if (!info) return failure("path not found", 404);
+            if (info.isSymbolicLink() || (kind === "file" ? !info.isFile() : !info.isDirectory())) return failure("path is not a regular file or directory", 400);
+            return json({ path: relativePath.replaceAll("\\", "/"), kind, bytes: kind === "file" ? info.size : 0, mtimeMs: info.mtimeMs, editable });
+          }
+          if (parts[3] === "files" && method === "DELETE" && parts.length > 4) {
+            const relativePath = parts.slice(4).join("/");
+            const filePath = safeProjectFile(projectDir(id), relativePath, { mustExist: true });
+            await unlink(filePath);
+            await commitMutation(`file deleted: ${relativePath}`);
+            return json({ path: relativePath, revision: state.revision });
+          }
+          if (parts[3] === "files-move" && parts.length === 4 && method === "POST") {
+            const body = await parseJsonBody(request);
+            const from = asString(body.from, "from", 1024);
+            const to = asString(body.to, "to", 1024);
+            const overwrite = body.overwrite === true;
+            if (body.overwrite !== undefined && typeof body.overwrite !== "boolean") throw new Error("overwrite must be a boolean");
+            const source = safeProjectFile(projectDir(id), from, { mustExist: true });
+            const target = safeProjectFile(projectDir(id), to);
+            if (source === target) throw new Error("from and to are the same path");
+            const existing = lstatIfExists(target);
+            if (existing?.isDirectory()) return failure("target is a directory; cannot replace a file with a directory", 409);
+            if (existing && !overwrite) return failure("target already exists; pass overwrite:true to replace it", 409);
+            await mkdir(dirname(target), { recursive: true });
+            const checkedSource = safeProjectFile(projectDir(id), from, { mustExist: true });
+            const checkedTarget = safeProjectFile(projectDir(id), to);
+            await rename(checkedSource, checkedTarget);
+            safeProjectFile(projectDir(id), to, { mustExist: true });
+            await commitMutation(`file moved: ${from} -> ${to}`);
+            return json({ from, to, revision: state.revision });
+          }
+          if (parts[3] === "folders" && ((parts.length === 4 && method === "POST") || (parts.length > 4 && method === "DELETE"))) {
+            const body = method === "POST" ? await parseJsonBody(request) : {};
+            const relativePath = method === "POST" ? asString(body.path, "path", 1024) : parts.slice(4).join("/");
+            const folderSegments = relativePath.replaceAll("\\", "/").split("/");
+            // Generated/dependency trees are not source folders even where file policy allows the name.
+            if (folderSegments.some((part) => ignoredProjectInputDirectories.has(part.toLowerCase()))) return failure("folder name is reserved", 400);
+            const folderPath = safeProjectFile(projectDir(id), relativePath, { isDirectory: true, ...(method === "DELETE" ? { mustExist: true } : {}) });
+            if (method === "POST") {
+              const existed = !!lstatIfExists(folderPath);
+              await mkdir(folderPath, { recursive: true });
+              safeProjectFile(projectDir(id), relativePath, { isDirectory: true, mustExist: true });
+              if (!existed) await commitMutation(`folder created: ${relativePath}`);
+              return json({ path: relativePath.replaceAll("\\", "/"), created: !existed, revision: state.revision }, existed ? 200 : 201);
+            }
+            if ((await readdir(folderPath)).length > 0) return failure("folder is not empty", 409);
+            await rmdir(folderPath);
+            await commitMutation(`folder deleted: ${relativePath}`);
+            return json({ path: relativePath.replaceAll("\\", "/"), revision: state.revision });
+          }
+          if (parts[3] === "chunks" && method === "GET" && parts.length > 4) {
+            const relativePath = parts.slice(4).join("/");
+            const filePath = safeProjectFile(projectDir(id), relativePath, { mustExist: true });
+            const offset = parseNonNegativeInteger(url.searchParams.get("offset"), "offset", 0);
+            const requested = parseNonNegativeInteger(url.searchParams.get("length"), "length", maxChunkBytes);
+            if (requested < 1) return failure("length must be at least 1", 400);
+            const handle = await openProjectFileForRead(filePath);
+            try {
+              const info = await handle.stat();
+              if (!info.isFile()) return failure("project file is not a regular file", 400);
+              if (info.size > maxSourceBytes) return failure("file is too large for chunked transfer", 413);
+              if (offset > info.size) return failure("offset is beyond the end of the file", 400);
+              const length = Math.min(requested, maxChunkBytes, info.size - offset);
+              const buffer = Buffer.alloc(length);
+              let filled = 0;
+              while (filled < length) {
+                const { bytesRead } = await handle.read(buffer, filled, length - filled, offset + filled);
+                if (bytesRead === 0) break;
+                filled += bytesRead;
+              }
+              const sha256 = await wholeFileSha256(handle, `${filePath}|${info.size}|${info.mtimeMs}`);
+              return json({ path: relativePath, offset, length: filled, totalBytes: info.size, sha256, mtimeMs: info.mtimeMs, data: buffer.subarray(0, filled).toString("base64") });
+            } finally {
+              await handle.close();
+            }
+          }
+          if (parts[3] === "uploads") {
+            if (parts.length === 4 && method === "POST") {
+              const body = await parseJsonBody(request);
+              const relativePath = asString(body.path, "path", 1024);
+              safeProjectFile(projectDir(id), relativePath);
+              const totalBytes = parseNonNegativeInteger(body.totalBytes, "totalBytes");
+              if (totalBytes > maxSourceBytes) return failure(`upload exceeds ${maxSourceBytes} bytes`, 413);
+              const sha256 = parseSha256(body.sha256);
+              if (uploads.size >= maxOpenUploads) return failure("too many open uploads; commit or abort one first", 429);
+              const uploadId = randomUUID();
+              const session: UploadSession = { projectId: id, path: relativePath, totalBytes, sha256, chunks: [], received: 0, timer: undefined as never };
+              uploads.set(uploadId, session);
+              touchUpload(uploadId, session);
+              return json({ uploadId, chunkBytes: maxChunkBytes, expiresInMs: uploadIdleMs }, 201);
+            }
+            const uploadId = parts[4] ?? "";
+            const session = uploads.get(uploadId);
+            if (parts.length >= 5 && (!session || session.projectId !== id)) return failure("upload not found", 404);
+            if (session && parts.length === 5 && method === "PUT") {
+              const body = await parseJsonBody(request);
+              const offset = parseNonNegativeInteger(body.offset, "offset");
+              if (offset !== session.received) return failure(`chunks must be contiguous: expected offset ${session.received}`, 409);
+              const bytes = decodeBase64Strict(body.data, "data");
+              if (bytes.length < 1 || bytes.length > maxChunkBytes) return failure(`chunk must be 1..${maxChunkBytes} bytes`, 413);
+              if (session.received + bytes.length > session.totalBytes) return failure("chunk exceeds declared totalBytes", 413);
+              session.chunks.push(bytes);
+              session.received += bytes.length;
+              touchUpload(uploadId, session);
+              return json({ uploadId, received: session.received, totalBytes: session.totalBytes });
+            }
+            if (session && parts.length === 5 && method === "DELETE") {
+              dropUpload(uploadId);
+              return json({ uploadId, aborted: true });
+            }
+            if (session && parts.length === 6 && parts[5] === "commit" && method === "POST") {
+              if (session.received !== session.totalBytes) return failure(`upload is incomplete: ${session.received} of ${session.totalBytes} bytes`, 409);
+              const bytes = Buffer.concat(session.chunks, session.totalBytes);
+              if (createHash("sha256").update(bytes).digest("hex") !== session.sha256) return failure("sha256 does not match the uploaded bytes", 422);
+              if (bytes.includes(0)) return failure("file contains a NUL byte", 400);
+              try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return failure("file is not valid UTF-8", 400); }
+              await writeProjectFile(projectDir(id), session.path, new Uint8Array(bytes));
+              dropUpload(uploadId);
+              await commitMutation(`file uploaded: ${session.path}`);
+              return json({ path: session.path, bytes: bytes.length, sha256: session.sha256, revision: state.revision });
+            }
+            return failure("method not allowed", 405);
+          }
+          if (parts[3] === "watch" && parts.length === 4 && method === "GET") {
+            if (watchClientCount >= maxWatchClients) return failure("too many watchers", 429);
+            const directory = projectDir(id);
+            let entry = projectWatches.get(id);
+            if (!entry) {
+              safeProjectFile(directory, "pocket.json", { allowConfig: true });
+              let watcher: FSWatcher;
+              try {
+                watcher = watchFs(directory, { recursive: true, persistent: false });
+              } catch (error) {
+                return failure(`recursive file watching is unavailable on this platform: ${error instanceof Error ? error.message : String(error)}`, 501);
+              }
+              const created: ProjectWatch = { watcher, clients: new Set(), pending: new Map(), unsubscribe: () => undefined };
+              const watchedId = id;
+              const flush = (): void => {
+                created.timer = undefined;
+                const batch = [...created.pending];
+                created.pending.clear();
+                for (const [rawPath, renamed] of batch) {
+                  const accepted = watchablePath(directory, rawPath);
+                  if (!accepted) continue;
+                  // A directory's own "change" is only entry churn; creation/removal arrives as "rename".
+                  if (accepted.kind === "directory" && !renamed) continue;
+                  for (const client of created.clients) client.send({ type: "change", path: accepted.relativePath, kind: accepted.kind, event: renamed ? "rename" : "change" });
+                }
+              };
+              watcher.on("change", (eventType, filename) => {
+                if (filename === null || filename === undefined) return;
+                const name = String(filename);
+                created.pending.set(name, (created.pending.get(name) ?? false) || eventType === "rename");
+                created.timer ??= setTimeout(flush, watchDebounceMs);
+                created.timer.unref?.();
+              });
+              watcher.on("error", () => {
+                for (const client of [...created.clients]) client.close();
+                closeProjectWatch(watchedId);
+              });
+              created.unsubscribe = subscribeState(state, (event) => {
+                if (event.type !== "status") return;
+                for (const client of created.clients) {
+                  if (client.revision !== event.status.revision) {
+                    client.revision = event.status.revision;
+                    client.send({ type: "revision", revision: event.status.revision });
+                  }
+                }
+              });
+              projectWatches.set(id, created);
+              entry = created;
+            }
+            const active = entry;
+            const response = sseResponse(request, (send, close) => {
+              const client: WatchClient = { send, close, revision: state.revision };
+              active.clients.add(client);
+              watchClientCount += 1;
+              send({ type: "ready", revision: state.revision });
+              return () => {
+                if (!active.clients.delete(client)) return;
+                watchClientCount -= 1;
+                if (active.clients.size === 0 && projectWatches.get(id) === active) closeProjectWatch(id);
+              };
+            });
+            server.timeout(request, 0);
+            return response;
+          }
+          if (parts[3] === "build" && parts[4] === "events" && parts.length === 5 && method === "GET") {
+            if (buildEventClientCount >= maxBuildEventClients) return failure("too many build event streams", 429);
+            const response = sseResponse(request, (send) => {
+              buildEventClientCount += 1;
+              const unsubscribe = subscribeState(state, send);
+              send({ type: "status", status: publicStatus(id, state) });
+              let released = false;
+              return () => {
+                if (released) return;
+                released = true;
+                buildEventClientCount -= 1;
+                unsubscribe();
+              };
+            });
+            server.timeout(request, 0);
+            return response;
+          }
+          if (parts[3] === "build" && parts[4] === "cancel" && parts.length === 5 && method === "POST") {
+            await parseJsonBody(request);
+            if (!cancelBuild(state)) return failure("no build is queued or running", 409);
+            const settled = buildSettled.get(state);
+            if (settled) await Promise.race([settled.catch(() => undefined), new Promise((done) => setTimeout(done, 10_000).unref?.())]);
+            return json({ cancelled: true, status: publicStatus(id, state) });
+          }
           if (parts[3] === "files") {
             if (parts.length === 4 && method === "GET") {
               return json({ files: await listEditableFiles(projectDir(id)), revision: state.revision });
@@ -4463,6 +4980,8 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   await diagnostics.recordLog({ message: "Studio started", ...(workspace.projectId ? { projectId: workspace.projectId } : {}) });
   server.stop = ((closeActiveConnections?: boolean) => {
     backupSchedulerStopped = true;
+    for (const uploadId of [...uploads.keys()]) dropUpload(uploadId);
+    for (const [watchId, entry] of [...projectWatches]) { for (const client of [...entry.clients]) client.close(); closeProjectWatch(watchId); }
     for (const timer of backupTimers.values()) clearTimeout(timer);
     backupTimers.clear();
     codex.dispose();

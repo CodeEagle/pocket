@@ -1,6 +1,6 @@
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -35,6 +35,8 @@ export type BuildGuestOptions = {
   keepSource?: string;
   /** Optional build log sink used by Pocket Studio. */
   log?: (line: string) => void;
+  /** Cancels the build: running compiler steps are killed and the build rejects. */
+  signal?: AbortSignal;
 };
 
 export type BuildGuestResult = {
@@ -152,17 +154,60 @@ function projectPrimaryFontArguments(projectRoot: string): string[] {
   return [...fonts.compilerArguments];
 }
 
-function runOrThrow(command: string[], cwd: string, log?: (line: string) => void): void {
-  const result = spawnSync(command[0], command.slice(1), {
-    cwd,
-    stdio: log ? "pipe" : "inherit",
-    encoding: "utf8",
+/**
+ * Run one build step. This is asynchronous (not spawnSync) so the Studio
+ * service stays responsive during a compile and can cancel it: when `signal`
+ * aborts, the step's whole process group is terminated and the promise
+ * rejects with "build cancelled". Output is streamed to `log` line by line.
+ */
+function runOrThrow(command: string[], cwd: string, log?: (line: string) => void, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolvePromise, reject) => {
+    if (signal?.aborted) return reject(new Error("build cancelled"));
+    // A group leader lets cancellation reach grandchildren (cargo -> compiler).
+    // Without a signal keep the previous behaviour (same group, inherited TTY).
+    const grouped = signal !== undefined && process.platform !== "win32";
+    const child = spawn(command[0], command.slice(1), {
+      cwd,
+      stdio: log ? ["ignore", "pipe", "pipe"] : "inherit",
+      detached: grouped,
+    });
+    const pending = ["", ""];
+    const feed = (index: 0 | 1, chunk: Buffer | string): void => {
+      pending[index] += chunk.toString();
+      const lines = pending[index].split(/\r?\n/);
+      pending[index] = lines.pop() ?? "";
+      for (const line of lines) if (line) log!(line);
+    };
+    child.stdout?.on("data", (chunk) => feed(0, chunk));
+    child.stderr?.on("data", (chunk) => feed(1, chunk));
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const signalTree = (name: NodeJS.Signals): void => {
+      try {
+        if (grouped && child.pid) process.kill(-child.pid, name);
+        else child.kill(name);
+      } catch {
+        // already exited
+      }
+    };
+    const onAbort = (): void => {
+      signalTree("SIGTERM");
+      killTimer = setTimeout(() => signalTree("SIGKILL"), 2000);
+      killTimer.unref?.();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const finish = (settle: () => void): void => {
+      if (killTimer) clearTimeout(killTimer);
+      signal?.removeEventListener("abort", onAbort);
+      settle();
+    };
+    child.on("error", (error) => finish(() => reject(error)));
+    child.on("close", (status) => finish(() => {
+      if (log) for (const rest of pending) if (rest) log(rest);
+      if (signal?.aborted) return reject(new Error("build cancelled"));
+      if (status !== 0) return reject(new Error(`${command[0]} exited with status ${status ?? 1}`));
+      resolvePromise();
+    }));
   });
-  if (log) {
-    for (const line of `${result.stdout ?? ""}\n${result.stderr ?? ""}`.split(/\r?\n/).filter(Boolean)) log(line);
-  }
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${command[0]} exited with status ${result.status ?? 1}`);
 }
 
 export function bytecodeCompilerCommand(rootPath: string, args: string[]): string[] {
@@ -763,7 +808,26 @@ function copyProjectAssets(projectRoot: string, destinationRoot: string, exclude
   copyTree(sourceRoot);
 }
 
+// Builds share the pinned upstream cache (prepare_upstream, frozen bun install)
+// and SDK-level scratch state. They used to be serialised implicitly because
+// every step blocked the event loop; keep that ordering explicitly now that
+// steps are asynchronous. A build cancelled while queued never starts.
+let buildQueue: Promise<void> = Promise.resolve();
+
 export async function buildGuest(options: BuildGuestOptions = {}): Promise<BuildGuestResult> {
+  const previous = buildQueue;
+  let release!: () => void;
+  buildQueue = new Promise<void>((resolveQueue) => { release = resolveQueue; });
+  try {
+    await previous;
+    if (options.signal?.aborted) throw new Error("build cancelled");
+    return await buildGuestSerialized(options);
+  } finally {
+    release();
+  }
+}
+
+async function buildGuestSerialized(options: BuildGuestOptions): Promise<BuildGuestResult> {
   // The SDK has no application entry of its own. Consumers and the sibling
   // demo pass an explicit projectRoot; a zero-argument build is supported only
   // for a checkout that intentionally places app.tsx at its root.
@@ -782,7 +846,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
   const packagedCompiler = process.env.POCKET_COMPILER_PATH?.trim();
   if (sourceBuild && !packagedCompiler) {
     report(`build_guest: validating the local pinned PocketJS cache (project=${projectRoot})`, options.log);
-    runOrThrow([process.env.POCKET_PYTHON || (process.platform === "win32" ? "python" : "python3"), join(root, "scripts/prepare_upstream.py")], root, options.log);
+    await runOrThrow([process.env.POCKET_PYTHON || (process.platform === "win32" ? "python" : "python3"), join(root, "scripts/prepare_upstream.py")], root, options.log, options.signal);
   }
   const compiler = resolve(packagedCompiler || join(upstream, "tools/build.ts"));
   if (!existsSync(compiler)) throw new Error(`build_guest: pinned PocketJS compiler not found after bootstrap: ${compiler}`);
@@ -790,7 +854,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
   // Dependencies are part of the pinned cache, never the application. A
   // frozen install keeps compiler behavior reproducible for external projects.
   if (sourceBuild && !packagedCompiler && existsSync(join(upstream, "package.json")) && existsSync(join(upstream, "bun.lock"))) {
-    runOrThrow(["bun", "install", "--frozen-lockfile"], upstream, options.log);
+    await runOrThrow(["bun", "install", "--frozen-lockfile"], upstream, options.log, options.signal);
   }
 
   // The compiler's JSX transformer imports Babel from the pinned cache. Keep
@@ -849,7 +913,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     const skipFontBaking = primaryFontArguments.length === 0 && options.bakeFonts !== true;
     report(`build_guest: compiler=${compiler}`, options.log);
     report(`build_guest: source=${entry}`, options.log);
-    runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes", ...(skipFontBaking ? ["--no-bake-fonts"] : []), ...primaryFontArguments], root, options.log);
+    await runOrThrow([bun, compiler, compilerEntry.path, "--framework=solid", `--project-root=${projectRoot}`, `--outdir=${output}`, `--hz=${tickHz}`, `--density=${rasterDensity}`, "--strict-classes", ...(skipFontBaking ? ["--no-bake-fonts"] : []), ...primaryFontArguments], root, options.log, options.signal);
 
     const compilerBase = compilerEntry.path.replace(/^.*[\\/]/, "").replace(/\.(?:tsx?|vue)$/, "");
     const compilerSource = join(output, `${compilerBase}.js`);
@@ -910,7 +974,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
       if (!existsSync(workerSource)) {
         throw new Error(`pinned compiler declared domains.worker but did not produce ${compilerBase}.worker.js`);
       }
-      runOrThrow(bytecodeCompilerCommand(root, ["--input", workerSource, "--output", workerBytecode, "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)]), root, options.log);
+      await runOrThrow(bytecodeCompilerCommand(root, ["--input", workerSource, "--output", workerBytecode, "--metadata", workerMetadata, "--kind", "script", "--tick-hz", String(tickHz)]), root, options.log, options.signal);
       if (!existsSync(workerBytecode) || !existsSync(workerMetadata)) {
         throw new Error("QuickJS compiler did not produce app.worker.qjbc and app.worker.bytecode.json");
       }
@@ -921,7 +985,7 @@ export async function buildGuest(options: BuildGuestOptions = {}): Promise<Build
     // Do not duplicate the ABI generation here. pocketjs_bytecode defaults to
     // pocket_spec::BINDING_GENERATION, the same contract consumed by the
     // runtime, so a generation bump cannot leave the build script stale.
-    runOrThrow(bytecodeCompilerCommand(root, ["--input", source, "--output", bytecode, "--metadata", metadata, "--kind", "script", "--tick-hz", String(tickHz)]), root, options.log);
+    await runOrThrow(bytecodeCompilerCommand(root, ["--input", source, "--output", bytecode, "--metadata", metadata, "--kind", "script", "--tick-hz", String(tickHz)]), root, options.log, options.signal);
     if (!existsSync(bytecode) || !existsSync(metadata)) throw new Error("QuickJS compiler did not produce app.qjbc and app.bytecode.json");
     const guestManifest = join(projectRoot, "manifest.json");
     const manifestObj = readJsonObject(guestManifest);

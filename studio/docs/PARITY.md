@@ -65,9 +65,12 @@ Auth column: `R` = read guards only; `W` = read guards + write credential.
 | GET/PUT | `/api/projects/:id/resources` | R/W | resource inventory / placements `{revision, packageId, placements}` | `studio.artifacts.resources` | [ ] |
 | GET | `/api/projects/:id/resources/preview?revision&package&key` | R | thumbnail image | `studio.artifacts.resources` | [ ] |
 
-**Missing on the service (needed by M2):** file rename, file delete, folder create/delete, `stat`,
-watch/notify, ranged (chunked) read/write, nested asset folders. Add them to `server.ts` with the
-same `safeProjectFile` guards and tests in `editor_server.test.ts`. The web Studio will gain them too.
+**Added on the service (see `sdk/docs/EDITOR_FS_AND_BUILD_ROUTES.md`):** `GET stat/<rel>`,
+`DELETE files/<rel>`, `POST files-move`, `POST folders`, `DELETE folders/<rel>` (empty only),
+`GET chunks/<rel>?offset&length` (base64, 131072 max), chunked upload `POST uploads`, `PUT uploads/:id`,
+`POST uploads/:id/commit`, `DELETE uploads/:id`, and `GET watch` (SSE). All reuse `safeProjectFile` /
+`writeProjectFile`, the write credential, the `projectWrites` lock and the Codex/WeChat/deploy busy checks.
+**Still missing:** nested asset folders (assets stay flat).
 
 ### 2.3 Build, logs, artifacts
 
@@ -79,8 +82,11 @@ same `safeProjectFile` guards and tests in `editor_server.test.ts`. The web Stud
 | GET | `/api/projects/:id/artifacts/<name>` | R | one of `app.js app.qjbc app.bytecode.json app.pak guest-manifest.json build.json app.worker.qjbc app.worker.bytecode.json` | `studio.artifacts.inspect` | [ ] |
 | GET/POST | `/api/projects/:id/diagnostics` | R/W | diagnostics export / record | `studio.logs.diagnostics` | [ ] |
 
-**Missing on the service (needed by M3):** build cancel, a build-event stream (today clients poll
-`/status`), structured diagnostics (file, line, column, message). Logs are plain strings.
+**Added on the service:** `POST build/cancel` (aborts the compiler process group; final state
+`error:"build cancelled"`), `GET build/events` (SSE `status`/`log`/`done`, pushed, no polling) and
+`EditorStatus.diagnostics[{file,line,column,severity,message}]` (project-relative, only while a build error is
+current). Logs remain plain strings (200 lines, 4096 chars). Caveat: line numbers for `bun` resolve errors refer to
+the JSX-lowered intermediate module.
 
 ### 2.4 Preview and deploy
 
