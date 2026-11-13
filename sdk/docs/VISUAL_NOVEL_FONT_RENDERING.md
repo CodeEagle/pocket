@@ -34,16 +34,19 @@ When neither `fonts.regular`/`fonts.bold` nor `--bake-fonts` is specified:
    via Flutter's `TextPainter`, and installs them into the native host through
    `pocket_set_host_font_metrics`. Studio's browser preview measures the same
    21 × 95 ASCII + CJK table via `<canvas>.measureText` and synchronizes it into
-   `pocket_probe` (`create` / `setHostFonts`).
+   `pocket_probe` (`create` / `setHostFonts`). This table is only a set of
+   per-slot scalar metrics; it does not install a shaped-string callback into
+   the Studio probe.
 3. Simple unshaped non-ASCII lines (CJK ideographs, kana, precomposed Hangul
    syllables, and CJK punctuation without combining marks, joiners, variation
    selectors, or emoji) reuse cached per-scalar widths via
-   `pocket_set_host_glyph_measure_callback`. Complex shaped lines (combining
-   marks, emoji ZWJ sequences, variation selectors, and complex scripts) invoke
-   `pocket_set_host_text_measure_callback` and cache whole-line widths within
-   both entry-count (`16,384`) and UTF-8 key-byte (`4 MiB`, `4 KiB`/line)
-   ceilings. Uncached advances record and replay deterministically through
-   `hostTextAdvance` trace scalars.
+   `pocket_set_host_glyph_measure_callback`. On Flutter, complex shaped lines
+   (combining marks, emoji ZWJ sequences, variation selectors, and complex
+   scripts) invoke `pocket_set_host_text_measure_callback`; Flutter measures the
+   whole line with the same `TextPainter` style used for painting. The native
+   host caches those whole-line widths within both entry-count (`16,384`) and
+   UTF-8 key-byte (`4 MiB`, `4 KiB`/line) ceilings. Uncached advances record
+   and replay deterministically through `hostTextAdvance` trace scalars.
 4. `PocketCanvasPainter` (`pocket_view_painter.dart`) resolves slots directly
    against platform system fonts (proportional default family for slots `0..15`
    and `19..20`; `monospace` followed by `Menlo` / `SF Mono` / `Consolas` /
@@ -52,6 +55,19 @@ When neither `fonts.regular`/`fonts.bold` nor `--bake-fonts` is specified:
    families. Tracked (`letterSpacing`) and 2D/projected-3D transformed text
    runs stay on vector `TEXT_RUN` records (`TEXT_RUN_FLAG_TRACKING` and
    `TEXT_RUN_FLAG_AFFINE`).
+
+## Studio preview shaping boundary
+
+The Studio preview currently sends the native probe only the ASCII/CJK metric
+table above. Its Canvas renderer measures and paints a complex run as one
+browser-shaped string, but the native probe has no synchronous callback to ask
+Canvas for that string's width. For those runs, native layout therefore uses
+its scalar fallback advances while Canvas paints the browser-shaped run. This
+can make Studio wrapping differ from Flutter for combining sequences, emoji
+ZWJ/variation-selector sequences, and complex scripts. Flutter's
+`pocket_set_host_text_measure_callback` path closes that gap for the Flutter
+host; Studio parity for complex shaping remains unverified and is not implied
+by the shared ASCII/CJK table.
 
 ## Optional custom primary fonts
 
@@ -71,9 +87,12 @@ typeface can declare project-relative font files in `pocket.json`:
 `sdk/scripts/build_guest.ts` resolves these paths from the project root and
 passes them to `tools/build.ts` as `--font-regular` and `--font-bold`, keeping
 `fonts: "baked"` automatically, while `PocketAppConfig.fontFamilyFallback`
-forwards matching registered Flutter font families through `PocketGuest` to both
-`PocketHostFontMetrics` measurement and `PocketCanvasPainter` / IME `TextField`
-rendering.
+forwards matching registered Flutter font families through `PocketGuest` to
+native `TEXT_RUN` measurement and `PocketCanvasPainter` / IME `TextField`
+rendering. A baked PAK keeps its font metrics and atlas draw path for tracked,
+transformed, and 3D text; host-table measurement and the extra
+tracked/transformed vector route are selected only by the `ui:fonts.host`
+admission marker or a font-less PAK.
 
 When dynamic fonts are loaded at runtime (for example via Flutter's
 `FontLoader.load()` or `PaintingBinding.instance.systemFonts`), `PocketView`

@@ -23,6 +23,11 @@ atlases. The default Flutter host path uses OS metrics and vector text.
   font implementations.
 - Recorded `hostTextAdvance` JSON values must fit a finite native `f32`.
   Reject finite `f64` values such as `1e300` before replay can overflow them.
+- Installed host metrics must not override explicit baked fonts. Select the
+  native measurement and tracked/affine draw path from the admitted PAK font
+  marker/atlases, including after host refresh and guest reinitialization.
+  A production-load regression verifies PAK advances and glyph images against
+  host-table advances and `TEXT_RUN` output.
 - Remove the View's duplicate native font refresh after recording. Runtime
   owns deferred metric synchronization; View invalidates its layout cache and
   schedules repaint. This preserves standalone runtime use and one update
@@ -37,6 +42,14 @@ atlases. The default Flutter host path uses OS metrics and vector text.
 - CI uses the repository Flutter pin, installs Chromium, and builds the current
   WASM/runtime pair for browser execution. Web game fixtures explicitly bake
   fonts and no longer assume a Darwin-only tool package on Linux.
+- UI frame fixtures recognize actual rounded panel commands while retaining
+  size, containment, motion, color and input assertions. Complete presence
+  transitions before interacting with the next modal. Keep fixture controls
+  inside the viewport with the intended column layout.
+- Clean-checkout CI builds the ignored Lantern guest from its canonical source
+  and the pinned official Hiyori resource tree, then shares that real bundle
+  with Flutter asset tests. Reuse the mini-app builder; do not add placeholder
+  bytecode, commit generated assets, or download the Cubism Core runtime.
 
 ## Validation
 
@@ -47,3 +60,7 @@ fixture executes actual QJBC and WASM through a button/axis input sequence.
 The native replay regression admits the maximum finite f32 value and rejects
 out-of-range recorded values. Final suite and release results are tracked by
 GitHub Actions for the reviewed commit.
+
+The local isolated SDK JS run passed all 161 test files. Release packaging
+preflight passed 13 tests with 158 assertions. These runs complement the
+Linux CI gate; they do not substitute for its Worker concurrency validation.

@@ -5242,6 +5242,16 @@ struct TextMetrics {
 }
 
 impl TextMetrics {
+    /// Host tables own text only for font-less packages or packages that
+    /// explicitly opt into host fonts. If a PAK has baked font atlases and no
+    /// `ui:fonts.host` marker, keep its advances and glyph draw path even when
+    /// a Flutter/Studio host has prewarmed host metrics installed.
+    fn uses_host_native_metrics(&self) -> bool {
+        self.requires_host_fonts
+            || self.fontless_pak
+            || (self.fonts.is_empty() && self.host_table.is_some())
+    }
+
     fn clear_caches(&self) {
         self.glyph_cache.borrow_mut().clear();
         self.segment_cache.borrow_mut().clear();
@@ -5366,10 +5376,12 @@ impl TextMetrics {
     }
 
     fn default_line_height(&self, slot: u8) -> f32 {
-        if let Some(ref host) = self.host_table {
-            if let Some(&lh) = host.line_heights.get(slot as usize) {
-                if lh.is_finite() && lh > 0.0 {
-                    return lh;
+        if self.uses_host_native_metrics() {
+            if let Some(ref host) = self.host_table {
+                if let Some(&lh) = host.line_heights.get(slot as usize) {
+                    if lh.is_finite() && lh > 0.0 {
+                        return lh;
+                    }
                 }
             }
         }
@@ -5550,15 +5562,30 @@ impl TextMetrics {
         } else {
             line_height
         };
-        if let Some(ref host) = self.host_table {
-            if (slot as usize) < HOST_FONT_SLOTS {
-                let mut max_width = 0.0_f32;
-                let mut lines = 0.0_f32;
-                for line in text.split('\n') {
-                    lines += 1.0;
-                    max_width = max_width.max(self.measure_host_line(host, line, slot, tracking));
+        if self.uses_host_native_metrics() {
+            if let Some(ref host) = self.host_table {
+                if (slot as usize) < HOST_FONT_SLOTS {
+                    let mut max_width = 0.0_f32;
+                    let mut lines = 0.0_f32;
+                    for line in text.split('\n') {
+                        lines += 1.0;
+                        max_width =
+                            max_width.max(self.measure_host_line(host, line, slot, tracking));
+                    }
+                    let measured_height = lines * line_height;
+                    if max_width.is_finite() && measured_height.is_finite() {
+                        return (max_width, measured_height);
+                    }
+                    if let Some(lane) = &self.trace_lane {
+                        replay::record_host_text_measure_failure(
+                            lane,
+                            "host-native text measurement exceeded finite f32 range".to_owned(),
+                        );
+                    }
+                    // The trace lane reports the invalid measurement at transaction
+                    // end. Keep infinity out of Core layout and the frame payload.
+                    return (0.0, 0.0);
                 }
-                return (max_width, lines * line_height);
             }
         }
         let font = self.font(slot);
@@ -5575,7 +5602,18 @@ impl TextMetrics {
             }
         }
         max_width = max_width.max(line_width);
-        (max_width, lines * line_height)
+        let measured_height = lines * line_height;
+        if max_width.is_finite() && measured_height.is_finite() {
+            (max_width, measured_height)
+        } else {
+            if let Some(lane) = &self.trace_lane {
+                replay::record_host_text_measure_failure(
+                    lane,
+                    "native text measurement exceeded finite f32 range".to_owned(),
+                );
+            }
+            (0.0, 0.0)
+        }
     }
 }
 
@@ -6145,7 +6183,7 @@ fn create_host(
         host.trace.scalar_lane(),
         {
             let m = host.text_metrics.borrow();
-            m.host_table.is_some() || m.fontless_pak
+            m.uses_host_native_metrics()
         },
     ) {
         set_error(&mut host, error);
@@ -6799,7 +6837,7 @@ pub unsafe extern "C" fn pocket_enable_auxiliary(
             host.trace.scalar_lane(),
         {
             let m = host.text_metrics.borrow();
-            m.host_table.is_some() || m.fontless_pak
+            m.uses_host_native_metrics()
         },
         ) {
             set_error(host, error);
@@ -6914,7 +6952,7 @@ fn install_host_assets(host: &mut HostState, pak: &[u8]) -> Result<AssetRegistry
         current.fontless_pak = metrics.fonts.is_empty();
         current.requires_host_fonts = metrics.requires_host_fonts;
         current.fonts = metrics.fonts;
-        current.host_table.is_some() || current.fontless_pak
+        current.uses_host_native_metrics()
     };
     {
         let mut core = host
@@ -7007,7 +7045,7 @@ fn initialize_guest_for_load(
         host.trace.scalar_lane(),
         {
             let m = host.text_metrics.borrow();
-            m.host_table.is_some() || m.fontless_pak
+            m.uses_host_native_metrics()
         },
     )?;
     start_worker(host)
@@ -8353,17 +8391,16 @@ pub unsafe extern "C" fn pocket_last_error(handle: *mut HostState) -> *const c_c
 fn invalidate_host_text_metrics(host: &mut HostState) -> Result<(), String> {
     host.draw_cache = None;
     host.frame_json_cache = None;
-    let enable_transformed = {
+    let use_host_native_metrics = {
         let m = host.text_metrics.borrow();
-        m.host_table.is_some() || m.fontless_pak
+        m.uses_host_native_metrics()
     };
     let mut core = host
         .ops
         .core_mut()
         .map_err(|error| format!("font metrics invalidate: {error:?}"))?;
-    if enable_transformed {
-        core.ui.set_native_transformed_text(true);
-    }
+    core.ui
+        .set_native_transformed_text(use_host_native_metrics);
     core.ui.invalidate_text_metrics();
     core.mutated();
     Ok(())
@@ -8439,10 +8476,11 @@ pub unsafe extern "C" fn pocket_set_host_font_metrics(
             });
             metrics.clear_caches();
         }
+        let host_fonts_active = host.text_metrics.borrow().uses_host_native_metrics();
         let _ = host.guest.with(|ctx| -> rquickjs::Result<()> {
             let globals = ctx.globals();
             if let Ok(ui) = globals.get::<_, Object>("ui") {
-                ui.set("__hostFonts", true)?;
+                ui.set("__hostFonts", host_fonts_active)?;
             }
             Ok(())
         });
@@ -12744,6 +12782,153 @@ mod smoke_tests {
                 0
             );
             pocket_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn baked_pak_keeps_pak_metrics_and_glyph_draw_path_with_host_table_installed() {
+        let (line_heights, cjk_advances, mut ascii_advances) = default_probe_host_font_metrics();
+        ascii_advances[4 * HOST_ASCII_COUNT + ('A' as usize - HOST_ASCII_START as usize)] = 31.0;
+
+        let source = CString::new(
+            r#"
+            const width = ui.measureText('AA', 4);
+            if (Math.abs(width - 8) > 1e-3) {
+              throw new Error('baked font metrics were replaced by host metrics: ' + width);
+            }
+            const n = ui.createNode(1);
+            ui.setProp(n, 24, 1); // absolute
+            ui.setProp(n, 28, 12); // left
+            ui.setProp(n, 25, 24); // top
+            ui.setProp(n, 97, 4); // FONT_SLOT = 4
+            ui.setProp(n, 96, 0xff112233); // TEXT_COLOR
+            ui.setProp(n, 100, 2.5); // TRACKING
+            ui.setProp(n, 131, 30); // ROTATE (deg)
+            ui.setText(n, 'A');
+            ui.insertBefore(1, n, 0);
+            globalThis.frame = () => {};
+            "#,
+        )
+        .unwrap();
+
+        let mut atlas = test_font_atlas(4, 4, 6, 2, 'A' as u32, &[255]);
+        // The PAK gives `A` a four-pixel advance; the host table above gives it
+        // 31 pixels, making the selected measurement source observable.
+        atlas[22] = 4;
+        let baked_pak = one_entry_pak("ui:font.4", &atlas);
+        let baked_handle = pocket_create(320.0, 240.0);
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    baked_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    line_heights.as_ptr(),
+                    cjk_advances.as_ptr(),
+                    ascii_advances.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_load(
+                    baked_handle,
+                    source.as_ptr(),
+                    baked_pak.as_ptr(),
+                    baked_pak.len(),
+                ),
+                0,
+                "{}",
+                CStr::from_ptr(pocket_last_error(baked_handle)).to_string_lossy()
+            );
+        }
+        let baked_ops = frame_json(baked_handle)["ops"].as_array().unwrap().clone();
+        assert_eq!(baked_ops.len(), 1);
+        assert_eq!(baked_ops[0]["type"], "image");
+        assert!(baked_ops[0]["asset"].as_str().unwrap().starts_with("pocket.texture."));
+
+        let verify_baked_after_refresh = CString::new(
+            r#"
+            if (ui.__hostFonts !== false) throw new Error('baked PAK became host-font active after refresh');
+            if (Math.abs(ui.measureText('AA', 4) - 8) > 1e-3) {
+              throw new Error('baked metrics changed after refresh');
+            }
+            "#,
+        )
+        .unwrap();
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    baked_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    line_heights.as_ptr(),
+                    cjk_advances.as_ptr(),
+                    ascii_advances.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_eval(baked_handle, verify_baked_after_refresh.as_ptr()),
+                0,
+                "{}",
+                CStr::from_ptr(pocket_last_error(baked_handle)).to_string_lossy()
+            );
+        }
+        let refreshed_baked_ops = frame_json(baked_handle)["ops"].as_array().unwrap().clone();
+        assert_eq!(refreshed_baked_ops.len(), 1);
+        assert_eq!(refreshed_baked_ops[0]["type"], "image");
+
+        let host_pak = one_entry_pak("ui:fonts.host", &[1]);
+        let host_handle = pocket_create(320.0, 240.0);
+        let host_source = CString::new(
+            r#"
+            const width = ui.measureText('AA', 4);
+            if (Math.abs(width - 62) > 1e-3) {
+              throw new Error('host font metrics were not selected: ' + width);
+            }
+            const n = ui.createNode(1);
+            ui.setProp(n, 24, 1);
+            ui.setProp(n, 28, 12);
+            ui.setProp(n, 25, 24);
+            ui.setProp(n, 97, 4);
+            ui.setProp(n, 96, 0xff112233);
+            ui.setProp(n, 100, 2.5);
+            ui.setProp(n, 131, 30);
+            ui.setText(n, 'A');
+            ui.insertBefore(1, n, 0);
+            globalThis.frame = () => {};
+            "#,
+        )
+        .unwrap();
+        unsafe {
+            assert_eq!(
+                pocket_set_host_font_metrics(
+                    host_handle,
+                    ACTIVE_HOST_FONT_SLOTS as u32,
+                    line_heights.as_ptr(),
+                    cjk_advances.as_ptr(),
+                    ascii_advances.as_ptr(),
+                ),
+                0
+            );
+            assert_eq!(
+                pocket_load(
+                    host_handle,
+                    host_source.as_ptr(),
+                    host_pak.as_ptr(),
+                    host_pak.len(),
+                ),
+                0,
+                "{}",
+                CStr::from_ptr(pocket_last_error(host_handle)).to_string_lossy()
+            );
+        }
+        let host_ops = frame_json(host_handle)["ops"].as_array().unwrap().clone();
+        assert_eq!(host_ops.len(), 1);
+        assert_eq!(host_ops[0]["type"], "text");
+        assert_eq!(host_ops[0]["text"], "A");
+
+        unsafe {
+            pocket_destroy(baked_handle);
+            pocket_destroy(host_handle);
         }
     }
 

@@ -370,8 +370,16 @@ fn validate_scalar(kind: String, value: f64) -> Result<ScalarSample, String> {
     if kind == "mathRandom" && !(0.0..1.0).contains(&value) {
         return Err("trace scalar mathRandom must be in [0,1)".to_owned());
     }
-    if kind == "hostTextAdvance" && value < 0.0 {
-        return Err("trace scalar hostTextAdvance must be non-negative".to_owned());
+    if kind == "hostTextAdvance" {
+        if value < 0.0 {
+            return Err("trace scalar hostTextAdvance must be non-negative".to_owned());
+        }
+        // Native measurement callbacks return f32. Replay converts this JSON
+        // f64 back to f32, so accepting a larger finite f64 would silently
+        // inject infinity into text layout and DrawOps.
+        if value > f32::MAX as f64 {
+            return Err("trace scalar hostTextAdvance must fit in a finite f32".to_owned());
+        }
     }
     Ok(ScalarSample { kind, value })
 }
@@ -622,8 +630,26 @@ pub(super) fn settle_host_text_advance<F: FnOnce() -> f32>(
         }
     } else {
         let measured = compute().max(0.0);
-        let _ = scalar_value(lane, "hostTextAdvance", measured as f64);
-        measured
+        match scalar_value(lane, "hostTextAdvance", measured as f64) {
+            Ok(_) => measured,
+            Err(error) => {
+                record_host_text_measure_failure(lane, error);
+                0.0
+            }
+        }
+    }
+}
+
+pub(super) fn record_host_text_measure_failure(
+    lane: &Rc<RefCell<ScalarLane>>,
+    error: String,
+) {
+    let mut borrowed = lane.borrow_mut();
+    if borrowed.mode == Mode::Record
+        && borrowed.transaction_open
+        && borrowed.failure.is_none()
+    {
+        borrowed.failure = Some(error);
     }
 }
 
@@ -750,6 +776,69 @@ mod tests {
         assert!(parse_intervals("[null]").is_err());
         assert!(validate_elapsed(f64::INFINITY).is_err());
         assert!(validate_elapsed(-0.1).is_err());
+    }
+
+    #[test]
+    fn host_text_advance_trace_values_must_fit_the_native_f32_contract() {
+        let max_f32 = f32::MAX as f64;
+        assert!(validate_scalar("hostTextAdvance".to_owned(), max_f32).is_ok());
+        let too_large = validate_scalar("hostTextAdvance".to_owned(), max_f32 * 2.0)
+            .unwrap_err();
+        assert!(too_large.contains("finite f32"), "error={too_large}");
+
+        let input = r#"{"idleMs":[],"scalars":[{"kind":"hostTextAdvance","value":1e300}]}"#;
+        let error = match parse_intervals(input) {
+            Err(error) => error,
+            Ok(_) => panic!("out-of-range hostTextAdvance unexpectedly parsed"),
+        };
+        assert!(error.contains("finite f32"), "error={error}");
+    }
+
+    #[test]
+    fn non_finite_recorded_host_text_advance_fails_the_transaction() {
+        let mut trace = TraceClock::default();
+        trace.mode = Mode::Record;
+        trace.transaction_open = true;
+        let lane = trace.scalar_lane();
+        {
+            let mut scalar_lane = lane.borrow_mut();
+            scalar_lane.mode = Mode::Record;
+            scalar_lane.transaction_open = true;
+        }
+
+        // The caller gets a finite width so Core layout cannot receive the
+        // overflow, and transaction completion retains the measurement error.
+        assert_eq!(settle_host_text_advance(&lane, || f32::INFINITY), 0.0);
+        let error = trace.finish().unwrap_err();
+        assert!(
+            error.contains("hostTextAdvance must be finite"),
+            "error={error}"
+        );
+    }
+
+    #[test]
+    fn host_font_width_overflow_stays_finite_and_fails_recording() {
+        let mut trace = TraceClock::default();
+        trace.mode = Mode::Record;
+        trace.transaction_open = true;
+        let lane = trace.scalar_lane();
+        {
+            let mut scalar_lane = lane.borrow_mut();
+            scalar_lane.mode = Mode::Record;
+            scalar_lane.transaction_open = true;
+        }
+        let mut metrics = crate::TextMetrics::default();
+        metrics.trace_lane = Some(lane.clone());
+        metrics.host_table = Some(crate::HostFontTable {
+            line_heights: [20.0; crate::HOST_FONT_SLOTS],
+            cjk_advances: [16.0; crate::HOST_FONT_SLOTS],
+            ascii_advances: [[f32::MAX; crate::HOST_ASCII_COUNT]; crate::HOST_FONT_SLOTS],
+        });
+
+        let (width, height) = metrics.measure("AA", 4, 0.0, f32::NAN);
+        assert_eq!((width, height), (0.0, 0.0));
+        let error = trace.finish().unwrap_err();
+        assert!(error.contains("exceeded finite f32 range"), "error={error}");
     }
 
     #[test]
