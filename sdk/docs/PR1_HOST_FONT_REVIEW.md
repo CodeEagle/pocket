@@ -165,3 +165,13 @@ real recorded idle turn with its stop pulse already consumed. Removing the
 running-phase guard reproduces the timeout; restoring it permits exit. A
 separate deliberately mismatched admission proves faulted shutdown terminates
 while the original replay error remains observable.
+
+The next Linux ASan run exposed the underlying error without hanging:
+`worker replay session ... was stopped before event ...`. A session wait had
+retained an older blanket stop rejection while the other trace waits used
+`stopped_event_allowed`. Host stop is recorded under the trace mutex before
+its atomic flag is stored; during that window an admitted active turn was
+incorrectly rejected. Reuse the existing policy under the same trace lock.
+A pure trace regression holds the atomic flag false, verifies the wait does
+not consume its frontier, then consumes facts/end/exit and verifies the full
+tape. The old policy fails this regression; the shared policy passes.
