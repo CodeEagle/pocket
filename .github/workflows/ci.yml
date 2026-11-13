@@ -88,11 +88,25 @@ jobs:
           cores=(/tmp/pocket-native-core.*)
           if ((${#cores[@]})); then
             for core in "${cores[@]}"; do
-              gdb --batch -ex "thread apply all bt" "$test_binary" "$core"
+              gdb --batch -ex "thread apply all bt full" "$test_binary" "$core"
             done
           else
             gdb --batch -ex run -ex "thread apply all bt" --args "$test_binary"
           fi
+
+      - name: Diagnose native memory safety with AddressSanitizer
+        if: always() && !cancelled() && steps.native-tests.outcome != 'skipped'
+        env:
+          RUSTC_BOOTSTRAP: "1"
+          RUSTFLAGS: "-Zsanitizer=address -Cforce-frame-pointers=yes"
+          CFLAGS: "-fsanitize=address -fno-omit-frame-pointer"
+          CARGO_TARGET_DIR: /tmp/pocket-native-asan
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+        run: |
+          for attempt in $(seq 1 20); do
+            echo "Native AddressSanitizer ${attempt}/20"
+            cargo test --locked --manifest-path sdk/native/Cargo.toml --target x86_64-unknown-linux-gnu --lib
+          done
 
 
   js-sdk-and-guest:
