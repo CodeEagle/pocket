@@ -93,6 +93,14 @@ function hasText(frame: Frame, label: string): boolean {
   return (frame.ops ?? []).some((item) => item.type === "text" && item.text === label);
 }
 
+function hasVisibleText(frame: Frame, label: string): boolean {
+  return (frame.ops ?? []).some((item) =>
+    item.type === "text" &&
+    item.text === label &&
+    (item.color === undefined || ((item.color >>> 24) & 0xff) !== 0),
+  );
+}
+
 function textValue(frame: Frame, prefix: string): string {
   const op = (frame.ops ?? []).find((item) => item.type === "text" && item.text?.startsWith(prefix));
   assert.ok(op?.text, `frame is missing text prefix ${prefix}`);
@@ -319,13 +327,24 @@ assert.equal(typeof (openRect as JsonObject).x, "number", "textInput.open rect m
 assert.equal(typeof (openRect as JsonObject).y, "number", "textInput.open rect must have y");
 assert.equal(typeof (openRect as JsonObject).width, "number", "textInput.open rect must have width");
 assert.equal(typeof (openRect as JsonObject).height, "number", "textInput.open rect must have height");
+const openHeight = (openRect as JsonObject).height as number;
+assert.ok(openHeight > 0, "textInput.open rect height must be positive");
+const inputFontSize = openEvent.payload?.fontSize;
+const inputPaddingVertical = openEvent.payload?.paddingVertical;
+assert.equal(typeof inputFontSize, "number", "textInput.open must describe its font size");
+assert.equal(typeof inputPaddingVertical, "number", "textInput.open must describe vertical padding");
+const requiredInputHeight = Math.ceil((inputFontSize as number) * 1.2) + 2 * (inputPaddingVertical as number);
+assert.ok(
+  openHeight >= requiredInputHeight,
+  `textInput.open shell is shorter than its line box plus padding: rect=${openHeight}, required=${requiredInputHeight}`,
+);
 const openFrame = inputFrames.find((frame) => frameEvents(frame, "textInput.open").length > 0);
 assert.ok(openFrame, "textInput.open frame is missing");
 assert.ok(hasText(openFrame!, "Tap to type"), "guest fallback should remain until the host confirms overlay attachment");
 const preAckEditFrame = inputFrames[3];
 assert.ok(preAckEditFrame && hasText(preAckEditFrame, "林岚🙂"), "pre-ACK native edit should remain visible through the Guest fallback");
 const openedFrame = inputFrames[4];
-assert.ok(openedFrame && !hasText(openedFrame, "Tap to type"), "textInput.opened did not hide the duplicate guest placeholder");
+assert.ok(openedFrame && !hasVisibleText(openedFrame, "Tap to type"), "textInput.opened did not hide the duplicate guest placeholder");
 const openedUpdates = frameEvents(openedFrame!, "textInput.update");
 const restoredAppearanceEvents = openedUpdates.filter((item) =>
   inputColorKeys.every((key) => Object.hasOwn(item.payload ?? {}, key)),
@@ -350,7 +369,7 @@ const duplicateOpenedFrame = inputFrames[5];
 assert.equal(frameEvents(duplicateOpenedFrame!, "textInput.update").length, 0, "duplicate current-session ACK must not resend appearance restore");
 const editedFrame = inputFrames[6];
 assert.ok(editedFrame, "native textInput.edit frame is missing");
-assert.equal(hasText(editedFrame, "林岚🙂"), false, "focused native editor should be the sole visible copy of the CJK/emoji value");
+assert.equal(hasVisibleText(editedFrame, "林岚🙂"), false, "focused native editor should be the sole visible copy of the CJK/emoji value");
 assert.equal(frameEvents(editedFrame, "textInput.update").length, 0, "native text echo caused a redundant update");
 const dismissedFrame = inputFrames[7];
 assert.ok(dismissedFrame && hasText(dismissedFrame, "林岚🙂"), "textInput.dismiss did not restore the edited guest value");
@@ -363,7 +382,7 @@ assert.ok(reopenedEvent, "reopened input did not emit textInput.open");
 assert.equal(reopenedEvent.payload?.editingSession, "guest-text-input-1:2");
 assertInputColors(reopenedEvent.payload, "transparent", "reopened textInput.open");
 const reopenedAckFrame = inputFrames[12];
-assert.equal(hasText(reopenedAckFrame!, "林岚🙂"), false, "current editingSession acknowledgement should hide the duplicate guest copy");
+assert.equal(hasVisibleText(reopenedAckFrame!, "林岚🙂"), false, "current editingSession acknowledgement should hide the duplicate guest copy");
 assert.equal(
   frameEvents(reopenedAckFrame!, "textInput.update").filter((item) =>
     inputColorKeys.every((key) => Object.hasOwn(item.payload ?? {}, key)),
@@ -403,6 +422,13 @@ assert.ok(
 const resizeResponses = runProbe([
   ...bootstrap(),
   ...tap(inputPoint),
+  event("textInput.opened", {
+    id: "guest-text-input-1",
+    editingSession: "guest-text-input-1:1",
+    revision: 0,
+    jsRevision: 0,
+  }),
+  { op: "frame", deltaMs: 16 },
   { op: "resize", width: 390, height: 200 },
   { op: "frame", deltaMs: 16 },
   { op: "frame", deltaMs: 16 },
@@ -415,6 +441,18 @@ const resizeOpen = resizeFrames
 assert.ok(resizeOpen, "QJBC resize scenario did not open the text input");
 const resizeOpenRect = resizeOpen.payload?.rect as JsonObject | undefined;
 assert.ok(resizeOpenRect && typeof resizeOpenRect.y === "number", "resize open rect must include y");
+assert.ok(typeof resizeOpenRect.height === "number", "resize open rect must include height");
+const resizeOpenHeight = resizeOpenRect.height as number;
+assert.ok(resizeOpenHeight > 0, "resize open rect height must be positive");
+const resizeInputFontSize = resizeOpen.payload?.fontSize;
+const resizeInputPaddingVertical = resizeOpen.payload?.paddingVertical;
+assert.equal(typeof resizeInputFontSize, "number");
+assert.equal(typeof resizeInputPaddingVertical, "number");
+assert.ok(
+  resizeOpenHeight >= Math.ceil((resizeInputFontSize as number) * 1.2) +
+    2 * (resizeInputPaddingVertical as number),
+  "resized input shell opened below its line box plus vertical padding",
+);
 const movedRectUpdate = resizeFrames
   .flatMap((frame) => frameEvents(frame, "textInput.update"))
   .find((item) => {
@@ -422,6 +460,11 @@ const movedRectUpdate = resizeFrames
     return rect && typeof rect.y === "number" && rect.y !== resizeOpenRect.y && !Object.hasOwn(item.payload ?? {}, "text");
   });
 assert.ok(movedRectUpdate, "live QJBC viewport resize did not emit a rect-only textInput.update");
+assert.equal(
+  (movedRectUpdate.payload?.rect as JsonObject).height,
+  resizeOpenHeight,
+  "viewport resize after textInput.opened collapsed the shell height",
+);
 assert.equal(
   resizeFrames.some((frame) => frameEvents(frame, "textInput.close").some((item) => item.payload?.id === "guest-text-input-1")),
   false,
