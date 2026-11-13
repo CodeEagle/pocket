@@ -146,7 +146,7 @@ void main() {
     Future<void> pump([int count = 1]) async {
       for (var i = 0; i < count; i++) {
         for (final event in frame.events) {
-          if (event.method == 'host.request') unawaited(host.handle(event));
+          if (event.method == 'host.request' || event.method.startsWith('stream.')) unawaited(host.handle(event));
         }
         await Future<void>.delayed(const Duration(milliseconds: 4));
         frame = runtime.frame(16);
