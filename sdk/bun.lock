@@ -20,6 +20,10 @@
         "@abandonware/noble": "1.9.2-26",
       },
     },
+    "packages/pocket_diagnostics": {
+      "name": "@pocket/diagnostics",
+      "version": "0.1.0",
+    },
     "packages/pocket_live2d": {
       "name": "@pocket/live2d",
       "version": "0.1.0",
@@ -183,6 +187,8 @@
     "@parcel/watcher-win32-x64": ["@parcel/watcher-win32-x64@2.6.0", "", { "os": "win32", "cpu": "x64" }, "sha512-cA+/pXV2YkfxlIcXOQ5fSWqAzzPyD78/x5qbK/I0vUkrlYHA8TIz+MXjAbGouguKVSI4bOmkTSJ1/poVSsgt+A=="],
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
+
+    "@pocket/diagnostics": ["@pocket/diagnostics@workspace:packages/pocket_diagnostics"],
 
     "@pocket/live2d": ["@pocket/live2d@workspace:packages/pocket_live2d"],
 

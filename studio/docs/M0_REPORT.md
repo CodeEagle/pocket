@@ -121,7 +121,7 @@ the expected ordered events with correct UTF-16 selection, and none is lost or d
 
 **Spike B: text rendering.** Guest renders a 5,000-line TSX file as virtualized `text` nodes, about
 60 visible lines with per-token colours. Measure p50/p95/p99 frame build+raster time while scrolling
-continuously for 10 s, and text-cache hit rate and evictions (`PocketTextLayoutCache.evictions`),
+continuously for 10 s, and text-cache `hitCount`, `layoutCount` and `evictionCount` (`PocketTextLayoutCache`),
 with capacity 256 and 2048. Pass: p95 < 8.3 ms at 120 Hz, or < 16.6 ms at 60 Hz, and no steady-state evictions with the larger cache.
 
 **Spike C: preview.** Load a second guest's bytecode into a child `CompositorSurface` and reload it
