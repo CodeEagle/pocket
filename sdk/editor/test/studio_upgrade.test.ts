@@ -1305,16 +1305,28 @@ describe("Studio self-upgrade end-to-end service lifecycle + Playwright Chromium
         undefined,
         { timeout: 10_000 },
       );
+      // Project loading runs alongside the startup update check; do not simulate
+      // an edit until the actual source has loaded and the editor is enabled.
+      await page.waitForFunction(
+        () => {
+          const source = document.getElementById("source");
+          return source instanceof HTMLTextAreaElement
+            && !source.disabled
+            && source.value.includes("export default function App()")
+            && !(document.getElementById("project-state")?.textContent || "").includes("未选择项目");
+        },
+        undefined,
+        { timeout: 10_000 },
+      );
+      await page.locator("#rail-source").click();
+      await page.locator("#source").waitFor({ state: "visible", timeout: 10_000 });
 
       // Make source editor dirty and verify clicking upgrade defers apply while dirty
       await page.evaluate(() => {
         (window as unknown as { __ALLOW_AUTO_APPLY__?: boolean }).__ALLOW_AUTO_APPLY__ = true;
-        const source = document.getElementById("source") as HTMLTextAreaElement | null;
-        if (source) {
-          source.value = "// unsaved user draft\nexport default function App() { return null; }\n";
-          source.dispatchEvent(new Event("input", { bubbles: true }));
-        }
       });
+      await page.locator("#source").fill("// unsaved user draft\nexport default function App() { return null; }\n");
+      expect(await page.locator("#save").isEnabled()).toBe(true);
       await page.locator("#studio-upgrade-action").click();
       await page.waitForFunction(
         () => (document.getElementById("studio-upgrade-status")?.textContent || "").includes("未保存修改"),
