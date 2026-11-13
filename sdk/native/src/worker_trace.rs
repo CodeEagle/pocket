@@ -856,10 +856,10 @@ impl WorkerTrace {
                 return Ok(());
             }
             if let Some(event) = state.replay_events.front() {
-                let expected_worker_exit = actor == TraceActor::Worker
-                    && event.session.as_str() == session
-                    && event.kind == "worker.exit";
-                if state.stopped_sessions.contains(&event.session) && !expected_worker_exit {
+                let event_actor = TraceActor::for_event(Mode::Replay, event);
+                if state.stopped_sessions.contains(&event.session)
+                    && !stopped_event_allowed(&state, event_actor, &event.session, &event.kind)
+                {
                     return Err(format!(
                         "worker replay session {} was stopped before event {}",
                         event.session, event.seq
@@ -1435,6 +1435,74 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["scheduler.stop", "turn.begin", "turn.facts", "turn.end"]
         );
+    }
+
+    #[test]
+    fn replay_wait_allows_an_active_turn_to_drain_after_scheduler_stop() {
+        let replay = WorkerTrace::new(Mode::Replay);
+        let events = [
+            event(0, "bootstrap", json!({"qjbc":"abc"})),
+            event(
+                1,
+                "turn.begin",
+                json!({"generation":1, "sequence":1, "nowMicros":7}),
+            ),
+            event(2, "scheduler.stop", json!({"generation":1})),
+            event(
+                3,
+                "turn.facts",
+                json!({"sequence":1, "nowMicros":7, "facts":[]}),
+            ),
+            event(
+                4,
+                "turn.end",
+                json!({"generation":1, "sequence":1, "executed":true, "elapsedMicros":1}),
+            ),
+            event(
+                5,
+                "worker.exit",
+                json!({"generation":1, "status":"stopped"}),
+            ),
+        ];
+        replay.begin_batch(&events).unwrap();
+        replay
+            .take(TraceActor::Host, "worker-1", "bootstrap")
+            .unwrap();
+        replay
+            .take(TraceActor::Worker, "worker-1", "turn.begin")
+            .unwrap();
+        replay
+            .take(TraceActor::Host, "worker-1", "scheduler.stop")
+            .unwrap();
+
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        replay
+            .wait_for_session(TraceActor::Worker, "worker-1", &stop)
+            .unwrap();
+        assert_eq!(
+            replay.peek_replay().unwrap().unwrap().kind,
+            "turn.facts",
+            "wait_for_session must not consume the admitted turn frontier"
+        );
+        replay
+            .await_turn(TraceActor::Worker, "worker-1", "turn.facts")
+            .unwrap();
+        replay
+            .take(TraceActor::Worker, "worker-1", "turn.facts")
+            .unwrap();
+        replay
+            .await_turn(TraceActor::Worker, "worker-1", "turn.end")
+            .unwrap();
+        replay
+            .take(TraceActor::Worker, "worker-1", "turn.end")
+            .unwrap();
+        replay
+            .await_turn(TraceActor::Worker, "worker-1", "worker.exit")
+            .unwrap();
+        replay
+            .take(TraceActor::Worker, "worker-1", "worker.exit")
+            .unwrap();
+        assert_eq!(replay.finish_batch().unwrap(), events);
     }
 
     #[test]
