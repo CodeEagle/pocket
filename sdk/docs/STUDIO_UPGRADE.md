@@ -74,3 +74,26 @@
 
 - Windows 最终消融结果：直接从 Bun 1.3.9 服务派生升级器，即使改用 Node 且忽略 stdio，仍会使替换服务出现 `EADDRINUSE`，因此移除该无效分支。仅在 Windows 使用 PowerShell `Start-Process`（独立窗口、无标准流重定向）启动现有 Node 管理 CLI，并等待启动器退出及返回有效 PID；升级状态机、鉴权、备份、回滚保持复用。macOS 继续直接派生原有 CLI。
 - 发布流程 `42999927580` 已在 macOS 与 Windows 通过真实独立 CLI 升级、保存草稿后自动恢复、网页自动刷新、失败回滚及服务配置回归；Windows 不再出现路径误判或端口继承占用。生命周期修正的本地 24 项测试、138 项断言通过，最终启动适配经 Argon Medium 复核通过。
+
+## Windows updater ancestry and SDK 0.1.15
+
+The Windows launcher deliberately uses the existing PowerShell `Start-Process`
+path above; replacing it with direct Bun/Node spawn reintroduces the port-handle
+inheritance failure already captured by the earlier ablation. Its short-lived
+launcher can exit before retirement. Windows `ParentProcessId` may then refer to
+an exited process or a reused PID ([Microsoft Win32_Process reference](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process)).
+
+A protected retirement must therefore avoid recursive OS tree termination.
+Build one plan from the process snapshot, exclude the updater and its visible
+descendants, and signal only the enumerated old-server PIDs in child-first
+order. Reject invalid snapshots or a target inside the protected subtree.
+Individual process termination does not terminate children on Windows
+([Microsoft process termination reference](https://learn.microsoft.com/en-us/windows/win32/procthread/terminating-a-process)).
+This retains cleanup of known old Workers without requiring a complete live
+ancestor chain or relaxing protection into an unproven recursive fallback.
+
+The PR CI now runs the same Windows standalone upgrade and rollback command as
+the Release job, including real detached CLI execution and Playwright Chromium
+navigation. Final macOS and Windows archives remain subject to the release
+installation/runtime gate. The unsuccessful 0.1.14 candidate was not published;
+its tag remains immutable, and the next candidate is 0.1.15.
