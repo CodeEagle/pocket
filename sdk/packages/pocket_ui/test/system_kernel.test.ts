@@ -91,7 +91,7 @@ class TestHost implements HostBridge {
       const generation = `gen-${instanceId}`;
       this.generations.set(instanceId, generation);
       this.appIds.set(instanceId, appId);
-      return Promise.resolve({ appId, instanceId, generation, preparedForOpen: params.prepareForOpen === true } as T);
+      return Promise.resolve({ appId, instanceId, generation } as T);
     }
     if (capability === "system.runtime.prepareOpen") {
       const instanceId = String(params.instanceId);
@@ -238,14 +238,12 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
     params: { appId: PROFILE },
   });
   assert.equal(openProfile.ok, true);
-  assert.equal(host.calls.find((call) => call.capability === "system.runtime.create")?.options?.timeoutFrames, 3600);
+  assert.equal(host.calls.find((call) => call.capability === "system.runtime.create")?.options?.timeoutFrames, 10800);
   assert.equal(host.calls.find((call) => call.capability === "system.runtime.awaitFirstFrame")?.options?.timeoutFrames, 2700);
   assert.deepEqual(
     host.calls.find((call) => call.capability === "system.runtime.create")?.params,
     {
       appId: PROFILE,
-      prepareForOpen: true,
-      cacheFirst: true,
       memory: { heapLimitBytes: 64 * 1024, maxPakBytes: 1 },
       initialEvents: [{
         method: "platform.presets",
@@ -276,8 +274,6 @@ test("caller cancelling its own foreground child call via system.app.cancel", as
     host.calls.find((call) => call.capability === "system.runtime.create" && call.params.appId === LOBBY)?.params,
     {
       appId: LOBBY,
-      prepareForOpen: true,
-      cacheFirst: true,
       memory: { heapLimitBytes: 128 * 1024 * 1024 },
       initialEvents: [{
         method: "platform.presets",
@@ -783,7 +779,7 @@ test("a cold open reports preparing and first-frame stages until its first frame
   try {
     const opening = invoke(systemRequest("cold-gate", "platform.apps.open", { appId: PROFILE }));
     await until(() => host.calls.some((call) => call.capability === "system.runtime.create"));
-    assert.equal(host.calls.find((call) => call.capability === "system.runtime.create")!.params.prepareForOpen, true);
+    assert.equal(host.calls.find((call) => call.capability === "system.runtime.create")!.params.prepareForOpen, undefined);
     assert.deepEqual(kernel.snapshot().opening, { appId: PROFILE, stage: "preparing" });
     assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
     assert.equal(host.posted.slice(before).some((event) => event.params.state === "onWillDisappear"), false);
@@ -877,21 +873,26 @@ test("a failed pre-entry update leaves the caller and prewarmed instance availab
   } finally { kernel.dispose(); }
 });
 
-test("a host that ignores cold-open package preparation cannot expose the old page", async () => {
+test("a cold-open preparation response with stale package facts keeps the page hidden", async () => {
   const { host, kernel, invoke } = createEnv();
   await kernel.ready;
   const request = host.request.bind(host);
   host.request = async (capability, params = {}, options) => {
     const value = await request(capability, params, options);
-    if (capability === "system.runtime.create") delete (value as JsonObject).preparedForOpen;
+    if (capability === "system.runtime.prepareOpen") {
+      return { ...value as JsonObject, previousGeneration: "stale-generation" } as never;
+    }
     return value as never;
   };
   try {
-    const result = await invoke(systemRequest("old-host", "platform.apps.open", { appId: PROFILE }));
+    const result = await invoke(systemRequest("stale-prepare", "platform.apps.open", { appId: PROFILE }));
     assert.equal(result.ok, false);
     assert.equal((result.error as JsonObject).code, "host_protocol_error");
     assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
-    assert.equal(host.destroyed.length, 1);
+    const resident = kernel.snapshot().residents.find((entry) => entry.appId === PROFILE);
+    assert.ok(resident, "the hidden child runtime remains available for retry");
+    assert.equal(resident.prewarmed, false);
+    assert.equal(resident.state, "suspended");
   } finally { kernel.dispose(); }
 });
 

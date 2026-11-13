@@ -6,12 +6,11 @@ import 'dart:ui' as ui;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:pocket_archive/pocket_archive.dart';
 import 'package:pocket_flutter/pocket_flutter.dart';
 import 'package:pocket_services/pocket_services.dart';
 
 import 'pocket_config.dart';
+import 'pocket_update_factory.dart';
 import 'pocket_worker.dart';
 import 'package_info_plugin.dart';
 import 'performance_history.dart';
@@ -319,7 +318,7 @@ final class PocketSession extends ChangeNotifier {
     final manifestJson = jsonDecode(manifestSource);
     _embeddedManifest = PocketGuestManifest.fromJson(manifestJson);
     final updateConfig = config.updates;
-    final embeddedBuild = _resolveEmbeddedBuild(
+    final embeddedBuild = resolvePocketEmbeddedBuild(
       _metadata,
       manifestJson,
       // Remote-only bootstrap metadata also pins the oldest allowed release.
@@ -328,58 +327,23 @@ final class PocketSession extends ChangeNotifier {
     );
     _embeddedBuild = embeddedBuild;
     if (!_downloadOnOpen) {
-      _embeddedVersion = _metadata['version'] as String? ?? 'embedded';
+      final manifestVersion = manifestJson is Map
+          ? manifestJson['version']
+          : null;
+      _embeddedVersion =
+          _metadata['version'] as String? ??
+          (manifestVersion is String ? manifestVersion : null) ??
+          'embedded';
     }
     if (updateConfig != null && updateConfig.configured) {
-      final directory = await getApplicationSupportDirectory();
-      final namespace = updateConfig.namespace;
-      final packageRoot = Directory(
-        '${directory.path}/pocket-packages/$appId/$namespace',
+      final updates = await createPocketUpdateCoordinator(
+        config: config,
+        metadata: _metadata,
+        manifest: manifestJson,
       );
-      final trustStore = updateConfig.trustPolicyConfigured
-          ? PocketTrustStore(
-              directory: packageRoot,
-              appId: appId,
-              rootKeyId: updateConfig.trustRootKeyId!,
-              rootPublicKey: base64Decode(updateConfig.trustRootPublicKey!),
-            )
-          : null;
-      final updates = PocketUpdateCoordinator(
-        manifestUri: updateConfig.manifestUri(appId),
-        appId: appId,
-        trustedKeys: updateConfig.trustPolicyConfigured
-            ? const <String, List<int>>{}
-            : <String, List<int>>{
-                updateConfig.keyId: base64Decode(updateConfig.publicKey),
-              },
-        store: PocketPackageStore(
-          packageRoot,
-          archiveExtractor: extractNativeArchive,
-        ),
-        expectedRuntimeAbi: _metadata['runtimeAbi'] as String,
-        requireBytecode: true,
-        // There is no embedded package to activate in downloadOnOpen mode.
-        // An explicit prepareForOpen gate also needs to admit a signed package
-        // at the embedded build when no remote baseline exists; older builds
-        // remain rejected by the coordinator's floor. Once a remote baseline
-        // exists, its version ID still prevents same-build replay.
-        // Keep one build of headroom so a signed package at the embedded
-        // build can be admitted on a first check. The final admission below
-        // still rejects every package below the embedded executable floor.
-        minimumBuild: embeddedBuild - 1,
-        trustStore: trustStore,
-        trustPolicyUri: updateConfig.trustPolicyConfigured
-            ? Uri.parse(updateConfig.trustPolicyUrl!)
-            : null,
-        debugHttpHosts: <String>{
-          if (kDebugMode) ...const <String>[
-            '127.0.0.1',
-            'localhost',
-            '10.0.2.2',
-          ],
-          ...updateConfig.debugHttpHosts,
-        },
-      );
+      if (updates == null) {
+        throw StateError('configured app updates did not create a coordinator');
+      }
       // The coordinator owns an HTTP client. If the widget was disposed while
       // assets/path resolution was in flight, no session field existed yet for
       // dispose() to close, so close this local coordinator before returning.
@@ -470,7 +434,8 @@ final class PocketSession extends ChangeNotifier {
         appId: appId,
         generation: generation,
         tag: 'session.ready',
-        message: 'Session generation $generation initialized (${active?.version ?? _embeddedVersion})',
+        message:
+            'Session generation $generation initialized (${active?.version ?? _embeddedVersion})',
         revision: active?.build ?? _embeddedBuild,
       );
       notifyListeners();
@@ -776,6 +741,10 @@ final class PocketSession extends ChangeNotifier {
       }
       if (!prepared.needsActivation ||
           prepared.package.versionId == sourceVersionId) {
+        if (lastError != null) {
+          lastError = null;
+          if (hasListeners) notifyListeners();
+        }
         return;
       }
       await _withAdmittedPackage(prepared, () {});
@@ -815,9 +784,10 @@ final class PocketSession extends ChangeNotifier {
     }
   }
 
-  /// Prepares an already resident runtime for presentation. By default this
-  /// checks the signed source first. With [cacheFirst], a locally verified
-  /// staged candidate is consumed and remote preparation runs in the background.
+  /// Prepares a hidden runtime for presentation. With [cacheFirst], it keeps
+  /// the healthy package available when the network check fails, but joins or
+  /// starts one bounded signed refresh before deciding whether to mount a
+  /// verified staged candidate.
   ///
   /// This is deliberately separate from [updates.apply]. Applying through the
   /// guest API schedules a remount and keeps [_busy] set until the visible
@@ -989,14 +959,15 @@ final class PocketSession extends ChangeNotifier {
     _busy = true;
     _packageAdmissionInFlight = true;
     try {
-      // A remote-only MiniApp's previous cache-first open may still be checking
-      // the mutable update index. Do not present this resident generation as
-      // a successful no-op while that check is in flight: wait for its existing
-      // preparation, then consume its verified stage below. Bundled runtimes
-      // keep their presentable-cache behavior. Background failures are recorded
-      // by _prepareCacheFirstInBackground and leave the healthy package usable.
+      // Join a preparation already started for this package, or start one if
+      // the last check finished before the latest release was published. A
+      // healthy cached package remains available on network failure; the
+      // background lane records that error and never advances its pointer.
+      if (_backgroundPreparation == null) {
+        _scheduleCacheFirstPreparation();
+      }
       final backgroundPreparation = _backgroundPreparation;
-      if (_downloadOnOpen && backgroundPreparation != null) {
+      if (backgroundPreparation != null) {
         await backgroundPreparation;
         if (_disposed) {
           throw const PocketCapabilityException(
@@ -1032,7 +1003,6 @@ final class PocketSession extends ChangeNotifier {
           staged.package.versionId == active?.package.versionId) {
         await _withAdmittedPackage(staged ?? active, () {});
         _busy = previousBusy;
-        _scheduleCacheFirstPreparation();
         return const <String, Object?>{'configured': true, 'updated': false};
       }
 
@@ -1041,7 +1011,6 @@ final class PocketSession extends ChangeNotifier {
       await _mount(staged);
       final actual = active;
       if (actual?.package.versionId == staged.package.versionId) {
-        _scheduleCacheFirstPreparation();
         return const <String, Object?>{'configured': true, 'updated': true};
       }
 
@@ -1104,32 +1073,6 @@ final class PocketSession extends ChangeNotifier {
     ready = false;
     _busy = false;
     if (hasListeners) notifyListeners();
-  }
-
-  static int _resolveEmbeddedBuild(
-    Map<String, dynamic> metadata,
-    Object? manifest, {
-    required bool requireBuild,
-  }) {
-    // Legacy artifacts may carry their release floor only in the manifest.
-    // An explicitly invalid metadata build must not be hidden by that fallback.
-    final value = metadata.containsKey('build')
-        ? metadata['build']
-        : manifest is Map && manifest.containsKey('build')
-        ? manifest['build']
-        : null;
-    if (value == null && !requireBuild) return 0;
-    if (value is! num ||
-        !value.isFinite ||
-        value < 1 ||
-        value > 9007199254740991 ||
-        value != value.truncateToDouble()) {
-      throw const FormatException(
-        'A positive integer embedded build is required in app.bytecode.json '
-        'or guest-manifest.json before enabling updates',
-      );
-    }
-    return value.toInt();
   }
 
   Map<String, dynamic> runtimeInfo() {
@@ -1201,6 +1144,46 @@ final class PocketSession extends ChangeNotifier {
       'versions': versions,
       'lastError': lastError,
     };
+  }
+
+  /// Reads the existing coordinator without changing package pointers. Hosts
+  /// use this for SystemUI's MiniApp version list; JS owns the management UI.
+  Future<PocketUpdateInspection?> inspectUpdate({
+    bool checkLatest = false,
+    PocketCancellationToken? cancellation,
+  }) async {
+    final initialization = _initializeFuture;
+    if (initialization != null) await initialization;
+    final pending = _backgroundPreparation;
+    if (pending != null) await pending;
+    final updates = _updates;
+    if (updates == null) return null;
+    if (_busy || _packageAdmissionInFlight || _download != null) {
+      throw const PocketCapabilityException(
+        'busy',
+        'A package operation is in progress',
+      );
+    }
+    cancellation?.throwIfCancelled();
+    return updates.inspectLatest(
+      checkLatest: checkLatest,
+      cancellation: cancellation,
+      mountedPackage: active?.package,
+    );
+  }
+
+  /// Stages a signed candidate through this session's coordinator. The
+  /// candidate remains unpointed until the regular open/visible-health path.
+  Future<void> prepareUpdate({PocketCancellationToken? cancellation}) async {
+    final initialization = _initializeFuture;
+    if (initialization != null) await initialization;
+    final pending = _backgroundPreparation;
+    if (pending != null) await pending;
+    cancellation?.throwIfCancelled();
+    await _checkWithCancellation(
+      const <String, dynamic>{},
+      cancellation: cancellation,
+    );
   }
 
   Future<void> _configureBridge(PocketPreparedPackage? package) =>
@@ -1429,7 +1412,8 @@ final class PocketSession extends ChangeNotifier {
           appId: appId,
           generation: mountedGeneration,
           tag: 'session.healthy',
-          message: 'Generation $mountedGeneration promoted healthy (${package?.version ?? _embeddedVersion})',
+          message:
+              'Generation $mountedGeneration promoted healthy (${package?.version ?? _embeddedVersion})',
           revision: package?.build ?? _embeddedBuild,
         );
         _send('updates.changed', await status());
@@ -1441,7 +1425,12 @@ final class PocketSession extends ChangeNotifier {
 
   Future<Map<String, dynamic>> _check([
     Map<String, dynamic> params = const <String, dynamic>{},
-  ]) async {
+  ]) => _checkWithCancellation(params);
+
+  Future<Map<String, dynamic>> _checkWithCancellation(
+    Map<String, dynamic> params, {
+    PocketCancellationToken? cancellation,
+  }) async {
     final updates = _requireUpdates();
     if (_busy || _packageAdmissionInFlight || _download != null) {
       throw const PocketCapabilityException(
@@ -1479,7 +1468,7 @@ final class PocketSession extends ChangeNotifier {
     _busy = true;
     _candidate = null;
     lastError = null;
-    final token = _download = PocketCancellationToken();
+    final token = _download = cancellation ?? PocketCancellationToken();
     try {
       _candidate = await updates.prepare(
         cancellation: token,
@@ -1954,25 +1943,11 @@ final class PocketSession extends ChangeNotifier {
     required String archivePath,
     required String destinationPath,
     required int maxOutputBytes,
-  }) async {
-    try {
-      await PocketNativeArchive.extract(
-        archivePath: archivePath,
-        destinationPath: destinationPath,
-        maxOutputBytes: maxOutputBytes,
-      );
-    } on MissingPluginException catch (error) {
-      throw PocketPackageException(
-        error.message ?? 'native archive extraction plugin is unavailable',
-        code: 'native-archive-unavailable',
-      );
-    } on PlatformException catch (error) {
-      throw PocketPackageException(
-        error.message ?? 'native archive extraction failed (${error.code})',
-        code: 'bundle-format',
-      );
-    }
-  }
+  }) => extractPocketNativeArchive(
+    archivePath: archivePath,
+    destinationPath: destinationPath,
+    maxOutputBytes: maxOutputBytes,
+  );
 
   /// Await plugin teardown and performance persistence when managing a
   /// session directly. Widget disposal schedules the same single cleanup.

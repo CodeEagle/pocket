@@ -54,6 +54,8 @@ function writeProject(
         "system.runtime.configure",
         "system.runtime.create",
         "system.runtime.prepareOpen",
+        "system.runtime.appUpdateStatus",
+        "system.runtime.appUpdatePrepare",
         "system.runtime.awaitFirstFrame",
         "system.runtime.destroy",
         "system.runtime.post",
@@ -69,6 +71,8 @@ function writeProject(
         "platform.apps.open",
         "platform.apps.prewarm",
         "platform.apps.cancel",
+        "platform.apps.update.status",
+        "platform.apps.update.prepare",
       ]
     : [
         "platform.storage.get",
@@ -155,13 +159,33 @@ async function openChild(): Promise<void> {
   }
 }
 
+async function prepareChildUpdate(): Promise<void> {
+  try {
+    const status = await platform.prepareAppUpdate(childAppId);
+    await host.request("fixture.signal", {
+      event: "update-prepared",
+      latestVersion: status.latestVersion,
+      latestBuild: status.latestBuild,
+      stagedVersion: status.stagedVersion,
+      stagedBuild: status.stagedBuild,
+    });
+  } catch (error) {
+    await host.request("fixture.signal", {
+      event: "update-prepare-error",
+      message: String(error),
+    });
+  }
+}
+
 // Prewarm a real child session so the FFI test can distinguish an immediate
 // cached open from a cold download and later consume a staged package.
 void prewarmChild();
 host.onEvent?.((event) => {
   if (event.method !== "input.pointer" || event.params.phase !== "up") return;
-  // The test sends x=24 for a retry/prewarm command and x=72 to enter.
-  if (Number(event.params.x) < 48) void prewarmChild();
+  // The test sends x=24 for prewarm, x=36 for update preparation, and x=72 to enter.
+  const x = Number(event.params.x);
+  if (x < 32) void prewarmChild();
+  else if (x < 48) void prepareChildUpdate();
   else void openChild();
 });
 
@@ -197,10 +221,11 @@ const host = createHostBridge();
 const platform = createPocketPlatformClient(undefined, { bridge: host });
 const [tapCount, setTapCount] = createSignal(0);
 const releaseVersion = ${JSON.stringify(version)};
+const releaseBuild = ${JSON.stringify(build)};
 host.onEvent?.((event) => {
   if (event.method === "platform.lifecycle") {
     void host.request("fixture.signal", {
-      event: "lifecycle", version: releaseVersion,
+      event: "lifecycle", version: releaseVersion, build: releaseBuild,
       state: event.params.state,
       generationChanged: event.params.generationChanged === true,
     });
@@ -212,12 +237,12 @@ host.onEvent?.((event) => {
     }
     const count = tapCount() + 1;
     setTapCount(count);
-    void host.request("fixture.signal", { event: "tap", version: releaseVersion, count });
+    void host.request("fixture.signal", { event: "tap", version: releaseVersion, build: releaseBuild, count });
   }
 });
 mount(() => <Screen class="w-full h-full flex-col bg-white">
   <View class="flex-col gap-2 p-4">
-    <Text class="text-base text-black">Mini:{releaseVersion} taps:{tapCount()}</Text>
+    <Text class="text-base text-black">Mini:{releaseVersion} build:{releaseBuild} taps:{tapCount()}</Text>
   </View>
 </Screen>);
 `,
@@ -250,7 +275,9 @@ try {
     // replacement, not a second root bytecode/PAK implementation.
     { appId: rootAppId, build: 1, version: "1.0.0", kind: "root" as const },
     { appId: childAppId, build: 1, version: "1.0.0", kind: "child" as const },
-    { appId: childAppId, build: 2, version: "2.0.0", kind: "child" as const },
+    // Keep the semantic version fixed so the runtime and update UI prove that
+    // build identity, not SemVer alone, selects the newer signed package.
+    { appId: childAppId, build: 2, version: "1.0.0", kind: "child" as const },
   ];
   for (const projectInfo of projects) {
     const project = mkdtempSync(join(workspace, `project-${projectInfo.kind}-${projectInfo.build}-`));
@@ -263,7 +290,13 @@ try {
         projectInfo.version,
         projectInfo.kind,
       );
-      const built = await buildGuest({ projectRoot: project, outDir: out });
+      // Keep this fixture focused on package update admission; host-font
+      // measurement has its own real FFI suite and is not part of OTA state.
+      const built = await buildGuest({
+        projectRoot: project,
+        outDir: out,
+        bakeFonts: true,
+      });
       const metadata = JSON.parse(readFileSync(built.metadata, "utf8")) as {
         runtimeAbi?: unknown;
       };
@@ -292,7 +325,7 @@ try {
             outDir: join(output, release.directory),
             keyFile,
             guestManifestPath: join(out, "guest-manifest.json"),
-            includeBundle: true,
+            includeBundle: false,
             signedAt: 1,
           });
         }
@@ -309,7 +342,7 @@ try {
           outDir: join(output, "child-v1"),
           keyFile,
           guestManifestPath: join(out, "guest-manifest.json"),
-          includeBundle: true,
+          includeBundle: false,
           signedAt: 1,
         });
       } else {
@@ -324,7 +357,7 @@ try {
           outDir: join(output, "child-v2"),
           keyFile,
           guestManifestPath: join(out, "guest-manifest.json"),
-          includeBundle: true,
+          includeBundle: false,
           signedAt: 1,
         });
       }

@@ -238,6 +238,37 @@ final class PocketPreparedPackage {
   };
 }
 
+/// Signed latest-package and local pointer facts for a single package.
+/// `staged` is deliberately separate from `lastGood`: downloading and
+/// verifying an update does not claim it is active or healthy.
+final class PocketUpdateInspection {
+  const PocketUpdateInspection({
+    required this.active,
+    required this.lastGood,
+    required this.previous,
+    required this.staged,
+    required this.latestVersion,
+    required this.latestBuild,
+    required this.latestVersionId,
+    required this.baselineVersionId,
+  });
+
+  final PocketVersionInfo? active;
+  final PocketVersionInfo? lastGood;
+  final PocketVersionInfo? previous;
+  final PocketVersionInfo? staged;
+  final String? latestVersion;
+  final int? latestBuild;
+  final String? latestVersionId;
+  final String? baselineVersionId;
+
+  bool get updateAvailable {
+    final latest = latestVersionId;
+    if (latest == null) return false;
+    return latest != (baselineVersionId ?? (lastGood ?? active)?.versionId);
+  }
+}
+
 /// Pure Dart update coordinator. Flutter host wiring decides when a prepared
 /// renderer is healthy and calls [commitHealthy]; this package has no widget
 /// or business UI dependency.
@@ -357,41 +388,12 @@ final class PocketUpdateCoordinator {
         code: 'update-baseline-missing',
       );
     }
-    final floorBuild = math.max(
-      minimumBuild,
-      math.max(
-        currentGood?.manifest.payload.build ?? 0,
-        math.max(
-          currentActive?.manifest.payload.build ?? 0,
-          mountedPackage?.manifest.payload.build ?? 0,
-        ),
-      ),
-    );
-    final establishedIdsAtFloor = <String>{
-      if (currentGood != null &&
-          currentGood.manifest.payload.build == floorBuild)
-        currentGood.versionId,
-      if (currentActive != null &&
-          currentActive.manifest.payload.build == floorBuild)
-        currentActive.versionId,
-      if (mountedPackage != null &&
-          mountedPackage.manifest.payload.build == floorBuild)
-        mountedPackage.versionId,
-    };
     final hasBaseline = minimumBuild > 0 || baselinePackage != null;
-    final manifestVersionId = pocketVersionId(signed.payload);
-    if (!allowDowngrade && hasBaseline) {
-      if (signed.payload.build < floorBuild ||
-          (signed.payload.build == floorBuild &&
-              (establishedIdsAtFloor.isEmpty ||
-                  !establishedIdsAtFloor.every(
-                    (id) => id == manifestVersionId,
-                  )))) {
-        throw PocketPackageFormatException(
-          'Refusing downgrade or replay: package build ${signed.payload.build} is not newer than current build $floorBuild',
-        );
-      }
-    }
+    _enforceReleaseAdmission(signed.payload, <PocketPackage?>[
+      currentGood,
+      currentActive,
+      mountedPackage,
+    ], hasBaseline: hasBaseline);
     if (baselinePackage != null) {
       await _store.seedBlobsFromPackage(baselinePackage, cancellation: token);
     }
@@ -665,6 +667,120 @@ final class PocketUpdateCoordinator {
 
   Future<List<PocketVersionInfo>> listVersions() =>
       _store.listVersions(verifier: verifier);
+
+  void _enforceReleaseAdmission(
+    PocketPackageManifest candidate,
+    Iterable<PocketPackage?> baselinePackages, {
+    required bool hasBaseline,
+  }) {
+    if (allowDowngrade || !hasBaseline) return;
+    var floorBuild = minimumBuild;
+    final baselines = baselinePackages.whereType<PocketPackage>().toList();
+    for (final baseline in baselines) {
+      floorBuild = math.max(floorBuild, baseline.manifest.payload.build);
+    }
+    final establishedIdsAtFloor = <String>{
+      for (final baseline in baselines)
+        if (baseline.manifest.payload.build == floorBuild) baseline.versionId,
+    };
+    final candidateId = pocketVersionId(candidate);
+    if (candidate.build < floorBuild ||
+        (candidate.build == floorBuild &&
+            (establishedIdsAtFloor.isEmpty ||
+                !establishedIdsAtFloor.every((id) => id == candidateId)))) {
+      throw PocketPackageFormatException(
+        'Refusing downgrade or replay: package build ${candidate.build} is not newer than current build $floorBuild',
+      );
+    }
+  }
+
+  /// Reads package pointers and, when requested, fetches only the latest
+  /// signed index/manifest. It never downloads blobs or changes package state.
+  Future<PocketUpdateInspection> inspectLatest({
+    bool checkLatest = true,
+    PocketCancellationToken? cancellation,
+    PocketPackage? mountedPackage,
+  }) async {
+    final token = cancellation ?? PocketCancellationToken();
+    _validateManifestUri();
+    _validateTrustPolicyUri();
+    if (checkLatest) await _refreshTrustPolicy(token, null);
+    token.throwIfCancelled();
+
+    final versions = await _store.listVersions(verifier: verifier);
+    PocketVersionInfo? find(bool Function(PocketVersionInfo) predicate) {
+      for (final version in versions) {
+        if (predicate(version)) return version;
+      }
+      return null;
+    }
+
+    final active = find((version) => version.isActive);
+    final lastGood = find((version) => version.isLastGood);
+    final previous = find((version) => version.isPrevious);
+    var floorBuild = math.max(
+      minimumBuild,
+      math.max(
+        active?.build ?? 0,
+        math.max(
+          lastGood?.build ?? 0,
+          mountedPackage?.manifest.payload.build ?? 0,
+        ),
+      ),
+    );
+    final floorIds = <String>{
+      if (active?.build == floorBuild) active!.versionId,
+      if (lastGood?.build == floorBuild) lastGood!.versionId,
+      if (mountedPackage?.manifest.payload.build == floorBuild)
+        mountedPackage!.versionId,
+    };
+    PocketVersionInfo? staged;
+    for (final version in versions) {
+      if (version.isActive || version.isLastGood || version.isPrevious) {
+        continue;
+      }
+      if (version.build < floorBuild ||
+          (version.build == floorBuild &&
+              floorIds.any((id) => id != version.versionId))) {
+        continue;
+      }
+      if (staged == null || version.build > staged.build) staged = version;
+    }
+
+    String? latestVersion;
+    int? latestBuild;
+    String? latestVersionId;
+    if (checkLatest) {
+      final fetched = await _fetchManifest(token, null);
+      await verifier.verify(fetched.signed);
+      token.throwIfCancelled();
+      final payload = fetched.signed.payload;
+      _enforceReleaseAdmission(
+        payload,
+        <PocketPackage?>[active?.package, lastGood?.package, mountedPackage],
+        hasBaseline:
+            minimumBuild > 0 ||
+            active != null ||
+            lastGood != null ||
+            mountedPackage != null,
+      );
+      latestVersion = payload.version;
+      latestBuild = payload.build;
+      latestVersionId = pocketVersionId(payload);
+    }
+    return PocketUpdateInspection(
+      active: active,
+      lastGood: lastGood,
+      previous: previous,
+      staged: staged,
+      latestVersion: latestVersion,
+      latestBuild: latestBuild,
+      latestVersionId: latestVersionId,
+      baselineVersionId:
+          mountedPackage?.versionId ?? (lastGood ?? active)?.versionId,
+    );
+  }
+
   Future<void> rollback({String? versionId}) =>
       _store.rollback(versionId: versionId, verifier: verifier);
 

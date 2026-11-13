@@ -75,6 +75,29 @@ export interface AppLaunch {
   cancel(): Promise<BridgeValue>;
 }
 
+/** Installed, active, staged, and signed-latest facts for one MiniApp. */
+export interface MiniAppUpdateStatus {
+  appId: string;
+  configured: boolean;
+  running: boolean;
+  installedVersion: string | null;
+  installedBuild: number | null;
+  activeVersion: string | null;
+  activeBuild: number | null;
+  latestVersion: string | null;
+  latestBuild: number | null;
+  stagedVersion: string | null;
+  stagedBuild: number | null;
+  updateAvailable: boolean;
+  stage: "idle" | "checking" | "ready" | "error" | "not_configured";
+  lastError: string | null;
+}
+
+export interface MiniAppUpdateStatusOptions {
+  /** Fetch and verify only the signed latest index and package manifest. */
+  checkLatest?: boolean;
+}
+
 /** One mutation in an atomic app-scoped platform storage batch. */
 export type PlatformStorageOperation =
   | { readonly type: "set"; readonly key: string; readonly value: JsonValue }
@@ -188,9 +211,15 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
   if (typeof host.onEvent !== "function") target.__pocketEvent = receive;
 
   const request = (name: string, params: BridgeObject = {}) => host.request(name, params,
-    name === "platform.apps.open" || name === "platform.apps.prewarm"
-      ? { timeoutFrames: 90 * simulationHz() }
-      : undefined);
+    name === "platform.apps.open"
+      ? { timeoutFrames: 210 * simulationHz() }
+      : name === "platform.apps.prewarm"
+        ? { timeoutFrames: 90 * simulationHz() }
+      : name === "platform.apps.update.prepare"
+        ? { timeoutFrames: 180 * simulationHz() }
+        : name === "platform.apps.update.status"
+          ? { timeoutFrames: 60 * simulationHz() }
+          : undefined);
   const launchApp = async (
     appId: string,
     argumentsValue: BridgeValue = null,
@@ -246,6 +275,28 @@ export function createPocketPlatformClient(send?: HostSend, options: PocketPlatf
       return () => { presetsListeners.delete(listener); };
     },
     listApps: () => request("platform.apps.list"),
+    getAppUpdateStatus: async (
+      appId: string,
+      statusOptions: MiniAppUpdateStatusOptions = {},
+    ): Promise<MiniAppUpdateStatus> => {
+      if (typeof appId !== "string" || appId.trim().length === 0) {
+        throw new TypeError("MiniApp appId must be a non-empty string");
+      }
+      if (typeof statusOptions.checkLatest !== "undefined" &&
+          typeof statusOptions.checkLatest !== "boolean") {
+        throw new TypeError("checkLatest must be a boolean");
+      }
+      return await request("platform.apps.update.status", {
+        appId,
+        checkLatest: statusOptions.checkLatest === true,
+      }) as MiniAppUpdateStatus;
+    },
+    prepareAppUpdate: async (appId: string): Promise<MiniAppUpdateStatus> => {
+      if (typeof appId !== "string" || appId.trim().length === 0) {
+        throw new TypeError("MiniApp appId must be a non-empty string");
+      }
+      return await request("platform.apps.update.prepare", { appId }) as MiniAppUpdateStatus;
+    },
     launchApp,
     openApp: async (appId: string, argumentsValue: BridgeValue = null, launchOptions?: AppLaunchOptions) =>
       (await launchApp(appId, argumentsValue, launchOptions)).result,

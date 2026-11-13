@@ -1394,6 +1394,29 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     if (request.capability === "platform.apps.prewarm") {
       return { value: await this.prewarmApp(request) };
     }
+    if (request.capability === "platform.apps.update.status") {
+      this.authorizeSystemUIUpdate(request);
+      const appId = this.requireInstalled(request.params.appId);
+      if (typeof request.params.checkLatest !== "undefined" &&
+          typeof request.params.checkLatest !== "boolean") {
+        throw new PocketSystemError("invalid_params", "checkLatest must be a boolean");
+      }
+      return {
+        value: await this.hostObject("system.runtime.appUpdateStatus", {
+          appId,
+          checkLatest: request.params.checkLatest === true,
+        }, { timeoutFrames: 60 * simulationHz() }),
+      };
+    }
+    if (request.capability === "platform.apps.update.prepare") {
+      this.authorizeSystemUIUpdate(request);
+      const appId = this.requireInstalled(request.params.appId);
+      return {
+        value: await this.hostObject("system.runtime.appUpdatePrepare", { appId }, {
+          timeoutFrames: 180 * simulationHz(),
+        }),
+      };
+    }
     if (request.capability.startsWith("platform.storage.")) {
       return { value: await this.storage(request) };
     }
@@ -1407,6 +1430,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       throw new PocketSystemError("system_context_denied", "system.container.close is restricted to the trusted SystemUI instance");
     }
     throw new PocketSystemError("capability_unavailable", "unsupported system capability: " + request.capability);
+  }
+
+  private authorizeSystemUIUpdate(source: SystemRequest): RuntimeRecord {
+    const record = this.authorizeRuntime(source);
+    if (record.appId !== this.systemUI || record.instanceId !== SYSTEM_UI_INSTANCE_ID) {
+      throw new PocketSystemError(
+        "system_context_denied",
+        "MiniApp update management is restricted to the trusted SystemUI instance",
+      );
+    }
+    return record;
   }
 
   private listApps(): JsonValue {
@@ -1487,15 +1521,15 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       } else {
         delete target.launchPresentationStyle;
       }
-      // Keep the caller presented while a resident/prewarmed package is checked.
-      // A newly created runtime performs the same admission before it is ready.
-      if (!created) {
-        try {
-          await this.prepareForOpen(target);
-        } catch (error) {
-          restoreLaunchPresentationStyle(target);
-          throw error;
-        }
+      // Keep the caller presented while the child checks its mutable signed
+      // package index. New and resident runtimes use the same preparation
+      // gate, so a completed older background check cannot make this open
+      // skip a release published since that check.
+      try {
+        await this.prepareForOpen(target);
+      } catch (error) {
+        restoreLaunchPresentationStyle(target);
+        throw error;
       }
       try {
         await this.lifecycle(resume, "onWillDisappear", { targetAppId, requestId: callId });
@@ -1589,10 +1623,6 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       appId,
       initialEvents: this.initialEventsForApp(appId, undefined, launchPresentationStyle),
     };
-    if (!prewarmed) {
-      createParams.prepareForOpen = true;
-      createParams.cacheFirst = true;
-    }
     if (catalogEntry?.memory) {
       const memory: JsonObject = {};
       if (catalogEntry.memory.heapLimitBytes !== undefined) {
@@ -1603,7 +1633,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       }
       createParams.memory = memory;
     }
-    const created = await this.hostObject("system.runtime.create", createParams, { timeoutFrames: 60 * simulationHz() });
+    const created = await this.hostObject("system.runtime.create", createParams, { timeoutFrames: 180 * simulationHz() });
     this.assertActive();
     const instanceId = created.instanceId;
     if (!nonEmptyString(instanceId) || instanceId === SYSTEM_UI_INSTANCE_ID) {
@@ -1611,10 +1641,6 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
     if (created.appId !== appId) {
       throw new PocketSystemError("host_protocol_error", "runtime.create returned a different appId");
-    }
-    if (!prewarmed && created.preparedForOpen !== true) {
-      await this.hostRequest("system.runtime.destroy", { instanceId }).catch(() => {});
-      throw new PocketSystemError("host_protocol_error", "runtime.create did not complete package preparation");
     }
     if (this.records.has(instanceId) || this.instanceForApp.has(appId)) {
       throw new PocketSystemError("duplicate_runtime", "runtime.create returned an already resident instance");
@@ -1647,7 +1673,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       generation: previousGeneration,
       cacheFirst: true,
       initialEvents: this.initialEventsForApp(record.appId, record.instanceId),
-    }, { timeoutFrames: 60 * simulationHz() });
+    }, { timeoutFrames: 180 * simulationHz() });
     this.assertActive();
     const generation = this.readGeneration(prepared.generation);
     if (prepared.instanceId !== record.instanceId || prepared.appId !== record.appId ||

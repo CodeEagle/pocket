@@ -121,7 +121,7 @@ void main() {
   });
 
   testWidgets(
-    'cached child opens on v1, stages v2 in background, then reopens on v2',
+    'a resident child checks a newly published same-version build before its next open',
     (tester) async {
       // Download signed v1 during prewarm. Entry must recheck and reuse its blobs.
       updateServer.releaseBuild = 1;
@@ -168,22 +168,34 @@ void main() {
         expect(root.session.active?.build, 1);
         expect(childBefore.isPresented, isFalse);
         expect(childBefore.session.active?.build, 1);
+        await _waitUntil(
+          tester,
+          () =>
+              updateServer.latestRequests > 0 &&
+              updateServer.openResponses == 0 &&
+              childBefore.session.active?.build == 1,
+          diagnostic: () =>
+              _hostDiagnostics(controller, updateServer, childRecordings),
+        );
         final pathsBeforeOpen = updateServer.filePaths.length;
         final oldGeneration = childBefore.generation;
         final oldFrame = _frameDigests(childRecordings.first).first;
         final oldInstanceId = childBefore.instanceId;
         updateServer.releaseBuild = 2;
         updateServer.holdLatest = true;
+        final checksBeforeOpen = updateServer.latestRequests;
 
-        // A cached v1 child must become visible while the background v2
-        // manifest request is still held by the real loopback server.
+        // The earlier signed check completed before build 2 was published.
+        // Re-entering the resident child must do a fresh check and keep it
+        // hidden until the signed build-only update is admitted and mounted.
         await _sendPointer(tester, root.session, x: 72);
         await _waitUntil(
           tester,
           () =>
               updateServer.latestHeld &&
+              updateServer.latestRequests > checksBeforeOpen &&
               _findInstanceOrNull(controller, configs.childId)?.isPresented ==
-                  true,
+                  false,
           diagnostic: () =>
               _hostDiagnostics(controller, updateServer, childRecordings),
         );
@@ -192,23 +204,35 @@ void main() {
         expect(openedChild.instanceId, oldInstanceId);
         expect(openedChild.generation, oldGeneration);
         expect(openedChild.session.active?.build, 1);
-        expect(openedChild.isPresented, isTrue);
+        expect(openedChild.isPresented, isFalse);
         expect(openedRoot.isPresented, isTrue);
         expect(_frameDigests(rootRecordings.first), isNotEmpty);
         expect(childRecordings.length, 1);
 
         updateServer.releaseLatest();
         updateServer.holdLatest = false;
-        final stagedStatus = await _waitForAvailableVersion(
+        await _waitUntil(
           tester,
-          openedChild.session,
-          '2.0.0',
+          () =>
+              _findInstanceOrNull(controller, configs.childId)?.generation !=
+                  oldGeneration &&
+              _findInstanceOrNull(controller, configs.childId)?.isPresented ==
+                  true &&
+              _findInstanceOrNull(
+                    controller,
+                    configs.childId,
+                  )?.session.active?.build ==
+                  2,
+          timeout: const Duration(seconds: 30),
+          diagnostic: () =>
+              _hostDiagnostics(controller, updateServer, childRecordings),
         );
-        expect(stagedStatus['activeBuild'], 1);
-        expect(stagedStatus['availableVersion'], '2.0.0');
-        expect(openedChild.generation, oldGeneration);
-        expect(openedChild.session.active?.version, '1.0.0');
-        expect(openedChild.isPresented, isTrue);
+        final updatedChild = _findInstance(controller, configs.childId);
+        expect(updatedChild.instanceId, oldInstanceId);
+        expect(updatedChild.generation, isNot(oldGeneration));
+        expect(updatedChild.session.active?.version, '1.0.0');
+        expect(updatedChild.session.active?.build, 2);
+        expect(updatedChild.isPresented, isTrue);
 
         final reusedHashes = _sharedReleaseBlobs(fixtureRoot!);
         expect(reusedHashes, isNotEmpty);
@@ -221,52 +245,12 @@ void main() {
           updatePaths.where((path) => reusedHashes.contains(path)),
           isEmpty,
         );
-        expect(childRecordings.length, 1);
-
-        final v1Recording = childRecordings.single;
-        await _waitUntil(tester, () => _frameDigests(v1Recording).isNotEmpty);
-        final beforeInput = _frameDigests(v1Recording).last;
-        await _sendPointer(tester, openedChild.session, x: 24);
-        await _waitUntil(tester, () {
-          final frames = _frameDigests(v1Recording);
-          return frames.length >= 2 && frames.last != beforeInput;
-        });
-
-        // The fixture's right-side close target invokes the real JS platform
-        // return capability. The root result signal confirms launch cleanup
-        // has settled before reopening the staged package.
-        await _sendPointer(tester, openedChild.session, x: 220);
-        await _waitUntil(tester, () {
-          return signals.any((event) => event['event'] == 'open-settled') &&
-              _findInstanceOrNull(controller, configs.childId) == null;
-        });
-        await _sendPointer(
-          tester,
-          _findInstance(controller, configs.rootId).session,
-          x: 72,
-        );
-        await _waitUntil(
-          tester,
-          () {
-            final child = _findInstanceOrNull(controller, configs.childId);
-            return child != null &&
-                child.isPresented &&
-                child.firstFrameReady &&
-                child.session.active?.build == 2;
-          },
-          timeout: const Duration(seconds: 30),
-          diagnostic: () =>
-              _hostDiagnostics(controller, updateServer, childRecordings),
-        );
-        final reopened = _findInstance(controller, configs.childId);
-        expect(reopened.instanceId, isNot(oldInstanceId));
-        expect(reopened.session.active?.version, '2.0.0');
         expect(childRecordings.length, greaterThanOrEqualTo(2));
         final v2Recording = childRecordings.last;
         await _waitUntil(tester, () => _frameDigests(v2Recording).isNotEmpty);
         final beforeV2Input = _frameDigests(v2Recording).first;
         expect(beforeV2Input, isNot(oldFrame));
-        await _sendPointer(tester, reopened.session, x: 24);
+        await _sendPointer(tester, updatedChild.session, x: 24);
         await _waitUntil(tester, () {
           final frames = _frameDigests(v2Recording);
           return frames.length >= 2 && frames.last != beforeV2Input;
@@ -1034,7 +1018,7 @@ final class _MiniUpdateServer {
         }
         final latest = index['latest'] as Map<String, dynamic>;
         if (appId == childAppId) {
-          final version = releaseBuild == 1 ? '1.0.0' : '2.0.0';
+          const version = '1.0.0';
           latest['releaseId'] = 'release-$releaseBuild';
           latest['id'] = appId;
           latest['packageId'] = appId;

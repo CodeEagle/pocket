@@ -11,7 +11,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/gestures.dart' show VelocityTracker, kTouchSlop;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show LogicalKeyboardKey, SystemNavigator;
+import 'package:flutter/services.dart'
+    show LogicalKeyboardKey, SystemNavigator, rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:pocket_flutter/pocket_flutter.dart'
     show PocketViewController, PocketEvent;
@@ -26,7 +27,10 @@ import 'pocket_diagnostics.dart';
 import 'pocket_host_config.dart';
 import 'pocket_image_store.dart';
 import 'pocket_startup_indicator.dart';
+import 'pocket_update_factory.dart';
+
 import 'package:pocket_flutter/src/pocket_compositor.dart';
+
 import 'pocket_platform_data.dart';
 import 'pocket_recordings.dart';
 import 'pocket_session.dart';
@@ -77,6 +81,8 @@ const List<String> _platformRequestCapabilities = <String>[
   'platform.apps.cancel',
   'platform.apps.return',
   'platform.apps.prewarm',
+  'platform.apps.update.status',
+  'platform.apps.update.prepare',
   'platform.storage.get',
   'platform.storage.set',
   'platform.storage.remove',
@@ -91,6 +97,8 @@ const List<String> _systemRequestCapabilities = <String>[
   'system.runtime.configure',
   'system.runtime.create',
   'system.runtime.prepareOpen',
+  'system.runtime.appUpdateStatus',
+  'system.runtime.appUpdatePrepare',
   'system.runtime.awaitFirstFrame',
   'system.runtime.destroy',
   'system.runtime.post',
@@ -1030,6 +1038,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   final Map<String, int> _surfaceHandles = <String, int>{};
   final Map<String, _PendingPlatformRequest> _pendingRequests =
       <String, _PendingPlatformRequest>{};
+  final Set<PocketCancellationToken> _miniAppUpdateCancellations =
+      <PocketCancellationToken>{};
   Future<bool>? _activeBackRequest;
   _NativeBackGesture? _backGesture;
 
@@ -1386,7 +1396,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
             ? PocketRecordingLibrary()
             : null);
 
-    final explicitDiagnostics = widget.diagnostics ?? widget.systemUI.diagnostics;
+    final explicitDiagnostics =
+        widget.diagnostics ?? widget.systemUI.diagnostics;
     _ownsDiagnostics = explicitDiagnostics == null;
     _diagnostics = explicitDiagnostics ?? PocketHostDiagnostics();
     if (_diagnostics case final diagnostics?
@@ -1524,6 +1535,10 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
   @override
   void dispose() {
     _disposed = true;
+    for (final cancellation in _miniAppUpdateCancellations.toList()) {
+      cancellation.cancel();
+    }
+    _miniAppUpdateCancellations.clear();
     WidgetsBinding.instance.removeObserver(this);
     _systemUIInstance.session.removeListener(_systemUIChanged);
     for (final pending in _pendingRequests.values.toList(growable: false)) {
@@ -1538,9 +1553,13 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     }
     unawaited(_systemUIInstance.session.close().catchError((Object _) {}));
     if (_ownsDiagnostics) {
-      unawaited(_diagnostics?.close().catchError((Object _) {}) ?? Future<void>.value());
+      unawaited(
+        _diagnostics?.close().catchError((Object _) {}) ?? Future<void>.value(),
+      );
     } else {
-      unawaited(_diagnostics?.flush().catchError((Object _) {}) ?? Future<void>.value());
+      unawaited(
+        _diagnostics?.flush().catchError((Object _) {}) ?? Future<void>.value(),
+      );
     }
     final dataFuture = _platformDataFuture;
     if (dataFuture != null) {
@@ -1802,6 +1821,14 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
       'system.runtime.configure' => _configure(params, ownerGeneration),
       'system.runtime.create' => _create(params, ownerGeneration),
       'system.runtime.prepareOpen' => _prepareOpen(params, ownerGeneration),
+      'system.runtime.appUpdateStatus' => _appUpdateStatus(
+        params,
+        ownerGeneration,
+      ),
+      'system.runtime.appUpdatePrepare' => _appUpdatePrepare(
+        params,
+        ownerGeneration,
+      ),
       'system.runtime.awaitFirstFrame' => _awaitFirstFrame(params),
       'system.runtime.destroy' => _destroy(params),
       'system.runtime.post' => _post(params),
@@ -2351,6 +2378,241 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     }
   }
 
+  Future<Map<String, Object?>> _appUpdateStatus(
+    Map<String, dynamic> params,
+    int ownerGeneration,
+  ) async {
+    _ensureOwnerGeneration(ownerGeneration);
+    final appId = _requiredString(params, 'appId');
+    final config = _trustedApplications[appId];
+    if (config == null) {
+      throw const PocketCapabilityException(
+        'app_not_installed',
+        'target app is not installed',
+      );
+    }
+    final checkLatest = params['checkLatest'] == true;
+    final runtime = _applications.values
+        .where((candidate) => candidate.appId == appId && !candidate.closing)
+        .firstOrNull;
+    final facts = await _loadMiniAppBootstrapFacts(config);
+    _ensureOwnerGeneration(ownerGeneration);
+    final configured = config.updates?.configured == true;
+    if (!configured) {
+      return _miniAppUpdateStatus(
+        config: config,
+        facts: facts,
+        runtime: runtime,
+      );
+    }
+    final cancellation = _beginMiniAppUpdateOperation();
+    PocketUpdateCoordinator? ownedCoordinator;
+    Object? error;
+    PocketUpdateInspection? inspection;
+    try {
+      if (runtime != null) {
+        inspection = await runtime.session.inspectUpdate(
+          checkLatest: checkLatest,
+          cancellation: cancellation,
+        );
+      } else {
+        ownedCoordinator = await createPocketUpdateCoordinator(
+          config: config,
+          metadata: facts.metadata,
+          manifest: facts.manifest,
+        );
+        inspection = await ownedCoordinator?.inspectLatest(
+          checkLatest: checkLatest,
+          cancellation: cancellation,
+        );
+      }
+    } on Object catch (cause) {
+      error = cause;
+    } finally {
+      ownedCoordinator?.dispose();
+      _finishMiniAppUpdateOperation(cancellation);
+    }
+    _ensureOwnerGeneration(ownerGeneration);
+    return _miniAppUpdateStatus(
+      config: config,
+      facts: facts,
+      runtime: runtime,
+      inspection: inspection,
+      error: error,
+    );
+  }
+
+  Future<Map<String, Object?>> _appUpdatePrepare(
+    Map<String, dynamic> params,
+    int ownerGeneration,
+  ) async {
+    _ensureOwnerGeneration(ownerGeneration);
+    final appId = _requiredString(params, 'appId');
+    final config = _trustedApplications[appId];
+    if (config == null) {
+      throw const PocketCapabilityException(
+        'app_not_installed',
+        'target app is not installed',
+      );
+    }
+    final runtime = _applications.values
+        .where((candidate) => candidate.appId == appId && !candidate.closing)
+        .firstOrNull;
+    final facts = await _loadMiniAppBootstrapFacts(config);
+    _ensureOwnerGeneration(ownerGeneration);
+    if (config.updates?.configured != true) {
+      return _miniAppUpdateStatus(
+        config: config,
+        facts: facts,
+        runtime: runtime,
+      );
+    }
+    final cancellation = _beginMiniAppUpdateOperation();
+    PocketUpdateCoordinator? ownedCoordinator;
+    Object? error;
+    PocketUpdateInspection? inspection;
+    try {
+      if (runtime != null) {
+        await runtime.session.prepareUpdate(cancellation: cancellation);
+        inspection = await runtime.session.inspectUpdate(
+          cancellation: cancellation,
+        );
+      } else {
+        ownedCoordinator = await createPocketUpdateCoordinator(
+          config: config,
+          metadata: facts.metadata,
+          manifest: facts.manifest,
+        );
+        if (ownedCoordinator == null) {
+          throw StateError(
+            'configured app updates did not create a coordinator',
+          );
+        }
+        await ownedCoordinator.prepare(cancellation: cancellation);
+        inspection = await ownedCoordinator.inspectLatest(
+          checkLatest: false,
+          cancellation: cancellation,
+        );
+      }
+    } on Object catch (cause) {
+      error = cause;
+    } finally {
+      ownedCoordinator?.dispose();
+      _finishMiniAppUpdateOperation(cancellation);
+    }
+    _ensureOwnerGeneration(ownerGeneration);
+    return _miniAppUpdateStatus(
+      config: config,
+      facts: facts,
+      runtime: runtime,
+      inspection: inspection,
+      error: error,
+    );
+  }
+
+  PocketCancellationToken _beginMiniAppUpdateOperation() {
+    final cancellation = PocketCancellationToken();
+    _miniAppUpdateCancellations.add(cancellation);
+    return cancellation;
+  }
+
+  void _finishMiniAppUpdateOperation(PocketCancellationToken cancellation) {
+    _miniAppUpdateCancellations.remove(cancellation);
+    cancellation.cancel();
+  }
+
+  Future<_MiniAppBootstrapFacts> _loadMiniAppBootstrapFacts(
+    PocketAppConfig config,
+  ) async {
+    final metadataSource =
+        config.bootstrapMetadataJson ??
+        await rootBundle.loadString(config.metadataAsset);
+    final manifestSource =
+        config.bootstrapManifestJson ??
+        await rootBundle.loadString(config.manifestAsset);
+    final metadata = Map<String, dynamic>.from(
+      jsonDecode(metadataSource) as Map,
+    );
+    final manifest = jsonDecode(manifestSource);
+    int? build;
+    try {
+      build = resolvePocketEmbeddedBuild(
+        metadata,
+        manifest,
+        requireBuild: config.updates?.configured == true,
+      );
+    } on Object {
+      // Unconfigured legacy bundles may not have declared a build number.
+    }
+    if (build == 0) build = null;
+    final manifestVersion = manifest is Map ? manifest['version'] : null;
+    final metadataVersion = metadata['version'];
+    return _MiniAppBootstrapFacts(
+      metadata: metadata,
+      manifest: manifest,
+      version: metadataVersion is String
+          ? metadataVersion
+          : manifestVersion is String
+          ? manifestVersion
+          : null,
+      build: build,
+    );
+  }
+
+  Map<String, Object?> _miniAppUpdateStatus({
+    required PocketAppConfig config,
+    required _MiniAppBootstrapFacts facts,
+    _RuntimeInstance? runtime,
+    PocketUpdateInspection? inspection,
+    Object? error,
+  }) {
+    final configured = config.updates?.configured == true;
+    final installed = inspection?.lastGood ?? inspection?.active;
+    final runtimeInfo = runtime?.session.runtimeInfo();
+    final storedActive = inspection?.active;
+    final staged = inspection?.staged;
+    final latestVersion = inspection?.latestVersion ?? staged?.version;
+    final latestBuild = inspection?.latestBuild ?? staged?.build;
+    final hasSignedLatest = inspection?.latestVersionId != null;
+    final installedVersion =
+        installed?.version ?? (config.downloadOnOpen ? null : facts.version);
+    final installedBuild =
+        installed?.build ?? (config.downloadOnOpen ? null : facts.build);
+    final stagedDiffersFromInstalled =
+        staged != null &&
+        (staged.version != installedVersion || staged.build != installedBuild);
+    final updateAvailable = hasSignedLatest
+        ? inspection!.updateAvailable
+        : stagedDiffersFromInstalled;
+    final stage = !configured
+        ? 'not_configured'
+        : error != null
+        ? 'error'
+        : staged != null
+        ? 'ready'
+        : 'idle';
+    return <String, Object?>{
+      'appId': config.appId,
+      'configured': configured,
+      'running': runtime != null,
+      'installedVersion': installedVersion,
+      'installedBuild': installedBuild,
+      'activeVersion': runtimeInfo?['version'] is String
+          ? runtimeInfo!['version']
+          : storedActive?.version,
+      'activeBuild': runtimeInfo?['build'] is int
+          ? runtimeInfo!['build']
+          : storedActive?.build,
+      'latestVersion': latestVersion,
+      'latestBuild': latestBuild,
+      'stagedVersion': staged?.version,
+      'stagedBuild': staged?.build,
+      'updateAvailable': updateAvailable,
+      'stage': stage,
+      'lastError': error?.toString() ?? runtime?.session.lastError,
+    };
+  }
+
   Future<Map<String, Object?>> _prepareOpen(
     Map<String, dynamic> params,
     int ownerGeneration,
@@ -2743,11 +3005,13 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     late final _PendingPlatformRequest pending;
     // Cold opens can download a signed package before awaiting the first frame.
     // Other platform requests retain their existing short deadline.
-    final timeout =
-        capability == 'platform.apps.open' ||
-            capability == 'platform.apps.prewarm'
-        ? const Duration(seconds: 75)
-        : _platformRequestTimeout;
+    final timeout = switch (capability) {
+      'platform.apps.open' => const Duration(seconds: 210),
+      'platform.apps.prewarm' => const Duration(seconds: 75),
+      'platform.apps.update.prepare' => const Duration(seconds: 180),
+      'platform.apps.update.status' => const Duration(seconds: 60),
+      _ => _platformRequestTimeout,
+    };
     final timer = Timer(timeout, () {
       final current = _pendingRequests[requestId];
       if (identical(current, pending)) {
@@ -3591,6 +3855,20 @@ final class _RuntimeInstance {
   late VoidCallback changeListener;
   final GlobalKey<PocketGuestSessionState> guestKey =
       GlobalKey<PocketGuestSessionState>();
+}
+
+final class _MiniAppBootstrapFacts {
+  const _MiniAppBootstrapFacts({
+    required this.metadata,
+    required this.manifest,
+    required this.version,
+    required this.build,
+  });
+
+  final Map<String, dynamic> metadata;
+  final Object? manifest;
+  final String? version;
+  final int? build;
 }
 
 final class _PocketBackInputBoundary extends StatefulWidget {
