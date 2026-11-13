@@ -7,6 +7,11 @@ conflict list below. The approved SDK prerequisites for the spikes have landed (
 of the three spikes has a measured result yet, because they need macOS, so the M0 exit test fails.
 M1 must not start yet (ground rule 1).
 
+**Owner decision (2026-11-13, later):** the spikes may be deferred; finish M1–M7 first. This
+overrides ground rule 1 for the spikes only. Each milestone below is still verified with real
+execution on Linux; macOS-only exit criteria (profile timings, real IME, on-screen compositing)
+are recorded as deferred, not as passed.
+
 ## 1. Why the spikes have no measurements
 
 This work ran in a Linux cloud container. All three spikes need things it does not have:
