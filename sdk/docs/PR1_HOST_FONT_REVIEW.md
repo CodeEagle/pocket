@@ -135,3 +135,23 @@ This regression tests parsing, so use a local `Ui::new()` and remove the
 unnecessary host/FFI lifecycle entirely. The original test fails under ASan;
 the adapted test and full library runs pass under ASan. Keep default parallel
 execution rather than masking the error by serializing tests.
+
+## Replay admission and stop boundaries
+
+`WorkerRuntime.wait_ready()` exposes the constructed core before the runner's
+first dispatch. The HTTP regression's UI publish could therefore precede its
+first `io.request`; replaying that prefix without a UI driver legitimately
+waited for the missing UI actor. Wait for the fixture server's actual request
+accept before publishing the command, and assert the stop prefix has no UI
+actor. Keep the complete recorded tape, HTTP/timer/duplex outputs and offline
+replay assertions unchanged.
+
+A separate Linux timeout core captured the Host waiting for runner exit while
+the runner slept in `Pulse.wait_runner(UINT64_MAX)`. The Host had admitted a
+recorded turn after stop. The pinned `engine/worker/src/runner.c` may invoke
+its wait callback after that step returns zero, before checking stop again.
+The callback must distinguish this running phase from its later busy-destroy
+phase using the existing lifecycle's `exited` fact. Return to the existing
+step-admission/stop guard while running; retain Pulse-based waiting after exit
+for pending native completion. Reuse the pinned callback boundary and existing
+lifecycle instead of introducing another stop state or polling loop.
