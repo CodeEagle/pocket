@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +9,8 @@ import {
   editorToolEnvironment,
   isEntrypoint,
   protectedRetirementPlan,
+  protectedProcessIsOutsideTargetTree,
+  killTree,
   commandIncludesPath,
   upgradeApply,
   makePidRecord,
@@ -175,6 +177,109 @@ test("upgrade retirement excludes the updater ancestry while retaining worker tr
   });
   expect(protectedRetirementPlan(processes, 100, 999)).toBeNull();
   expect(protectedRetirementPlan([{ pid: 1, ppid: 2 }, { pid: 2, ppid: 1 }], 100, 1)).toBeNull();
+});
+
+
+test("upgrade retirement kills the real server tree but preserves its detached updater", { timeout: 10_000 }, async () => {
+  const source = `
+    const { spawn } = require("node:child_process");
+    const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const updater = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+    const waitForSpawn = (child) => new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+    Promise.all([waitForSpawn(worker), waitForSpawn(updater)]).then(() => {
+      updater.unref();
+      process.stdout.write(JSON.stringify({ workerPid: worker.pid, updaterPid: updater.pid }) + "\\n");
+    }, (error) => {
+      process.stderr.write(String(error));
+      process.exitCode = 1;
+    });
+    setInterval(() => {}, 1000);
+  `;
+  const server = spawn("node", ["-e", source], { stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  server.stderr.setEncoding("utf8");
+  server.stderr.on("data", (chunk) => { stderr += chunk; });
+
+  let childPids: { workerPid: number; updaterPid: number } | undefined;
+  try {
+    childPids = await new Promise<{ workerPid: number; updaterPid: number }>((resolveReady, rejectReady) => {
+      let output = "";
+      const timer = setTimeout(() => rejectReady(new Error(`process tree did not become ready: ${stderr}`)), 3_000);
+      server.once("error", (error) => {
+        clearTimeout(timer);
+        rejectReady(error);
+      });
+      server.once("exit", (code) => {
+        clearTimeout(timer);
+        rejectReady(new Error(`server process exited before ready (${code}): ${stderr}`));
+      });
+      server.stdout.setEncoding("utf8");
+      server.stdout.on("data", (chunk) => {
+        output += chunk;
+        const newline = output.indexOf("\n");
+        if (newline < 0) return;
+        clearTimeout(timer);
+        try { resolveReady(JSON.parse(output.slice(0, newline))); }
+        catch (error) { rejectReady(error); }
+      });
+    });
+
+    if (process.platform !== "win32") {
+      const updaterPpid = spawnSync("ps", ["-o", "ppid=", "-p", String(childPids.updaterPid)], { encoding: "utf8" });
+      expect(updaterPpid.status).toBe(0);
+      expect(Number(updaterPpid.stdout.trim())).toBe(server.pid);
+    }
+    await killTree(server.pid!, "SIGTERM", childPids.updaterPid);
+
+    const processState = (pid: number) => {
+      const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+      if (result.status === 0) {
+        const state = result.stdout.trim();
+        return state && !/^[ZX]/.test(state) ? "alive" : "exited";
+      }
+      try { process.kill(pid, 0); return "alive"; }
+      catch (error) { return error.code === "ESRCH" ? "exited" : "alive"; }
+    };
+    const waitForExit = async (pid: number) => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        if (processState(pid) === "exited") return true;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+      }
+      return false;
+    };
+
+    expect(await waitForExit(server.pid!)).toBe(true);
+    expect(await waitForExit(childPids.workerPid)).toBe(true);
+    expect(processState(childPids.updaterPid)).toBe("alive");
+  } finally {
+    for (const pid of [server.pid, childPids?.workerPid, childPids?.updaterPid]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+    if (server.pid) server.kill("SIGKILL");
+  }
+});
+
+
+test("an updater already reparented to init is safe for recursive retirement", () => {
+  const processes = [
+    { pid: 1, ppid: 0 },
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: 1 },
+  ];
+  expect(protectedProcessIsOutsideTargetTree(processes, 100, 200)).toBe(true);
+  expect(protectedProcessIsOutsideTargetTree([
+    { pid: 0, ppid: 0 },
+    { pid: 100, ppid: 0 },
+    { pid: 200, ppid: 0 },
+  ], 100, 200)).toBe(true);
+  expect(protectedProcessIsOutsideTargetTree(processes, 100, 300)).toBe(false);
+  expect(protectedProcessIsOutsideTargetTree([{ pid: 200, ppid: 100 }], 100, 200)).toBe(false);
+  expect(protectedProcessIsOutsideTargetTree([{ pid: 200, ppid: 999 }], 100, 200)).toBe(false);
 });
 
 
