@@ -237,6 +237,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     this.onExit,
     this.showPerformanceOverlay = false,
     this.backgroundColor = const Color(0xFF000000),
+    this.nativeEdgeExitEnabled = true,
   }) : _bundledCatalogAssetSource = null;
 
   /// Builds the standard shell configuration from one embedded app catalog.
@@ -268,6 +269,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     VoidCallback? onExit,
     bool showPerformanceOverlay = false,
     Color backgroundColor = const Color(0xFF000000),
+    bool nativeEdgeExitEnabled = true,
   }) {
     final source = _BundledCatalogAssetSource(
       catalogAsset: catalogAsset,
@@ -321,6 +323,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
       onExit: onExit,
       showPerformanceOverlay: showPerformanceOverlay,
       backgroundColor: backgroundColor,
+      nativeEdgeExitEnabled: nativeEdgeExitEnabled,
     );
   }
 
@@ -344,6 +347,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
     VoidCallback? onExit,
     bool showPerformanceOverlay = false,
     Color backgroundColor = const Color(0xFF000000),
+    bool nativeEdgeExitEnabled = true,
   }) : loadHostConfig = loadHostConfig,
        hostConfigUrl = hostConfigUrl,
        loadBundledApplications = source.load,
@@ -362,6 +366,7 @@ final class PocketSystemHostApplication extends StatefulWidget {
        onExit = onExit,
        showPerformanceOverlay = showPerformanceOverlay,
        backgroundColor = backgroundColor,
+       nativeEdgeExitEnabled = nativeEdgeExitEnabled,
        _bundledCatalogAssetSource = source,
        super(key: key);
 
@@ -392,6 +397,11 @@ final class PocketSystemHostApplication extends StatefulWidget {
   final VoidCallback? onExit;
   final bool showPerformanceOverlay;
   final Color backgroundColor;
+
+  /// Whether an unhandled native edge swipe may leave the Pocket container.
+  /// Guest-managed page gestures remain enabled when this is false.
+  final bool nativeEdgeExitEnabled;
+
   final _BundledCatalogAssetSource? _bundledCatalogAssetSource;
 
   @override
@@ -588,6 +598,10 @@ final class _PocketSystemHostApplicationState
 
   @override
   Widget build(BuildContext context) {
+    // PocketSystemHostApplication creates an inner MaterialApp. Capture the
+    // enclosing route before building that nested Navigator so edge preview
+    // animates the route that actually owns the container.
+    final nativeExitRoute = ModalRoute.of(context);
     // A popped route can remain mounted during its exit animation. Drop the
     // remote surface now, rather than waiting for that animation to dispose it.
     if (_remoteDismissed && _hostConfigProgressOwner.isCancelled) {
@@ -653,6 +667,8 @@ final class _PocketSystemHostApplicationState
                     recordings: widget.recordings,
                     diagnostics: widget.diagnostics,
                     onClose: widget.onExit,
+                    nativeEdgeExitEnabled: widget.nativeEdgeExitEnabled,
+                    nativeExitRoute: nativeExitRoute,
                   )
                 : PocketSystemHost.fromHostConfig(
                     key: ObjectKey(_hostConfigProgressOwner),
@@ -661,6 +677,8 @@ final class _PocketSystemHostApplicationState
                     recordings: widget.recordings,
                     diagnostics: widget.diagnostics,
                     onClose: _exitRemote,
+                    nativeEdgeExitEnabled: widget.nativeEdgeExitEnabled,
+                    nativeExitRoute: nativeExitRoute,
                     approveSystemUI:
                         widget.approveSystemUI ??
                         ((app) => app.withNativePolicy(
@@ -677,6 +695,37 @@ final class _PocketSystemHostApplicationState
             body = loadingError(cause);
           }
         }
+        final scaffold = Scaffold(
+          appBar: canExit
+              ? AppBar(
+                  backgroundColor: widget.backgroundColor,
+                  foregroundColor:
+                      widget.backgroundColor.computeLuminance() > 0.179
+                      ? Colors.black
+                      : Colors.white,
+                  leading: IconButton(
+                    key: const ValueKey('pocket-container-exit'),
+                    tooltip: '返回退出',
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: _exitRemote,
+                  ),
+                  title: const Text('远程容器'),
+                )
+              : null,
+          backgroundColor: bootstrap == null || error != null
+              ? widget.backgroundColor
+              : null,
+          body: body,
+        );
+        final homeContent = !systemHostMounted && canExit
+            ? _PocketBackInputBoundary(
+                controller: widget.controller ?? _backController,
+                nativeEdgeExitEnabled: widget.nativeEdgeExitEnabled,
+                nativeExitRoute: nativeExitRoute,
+                onUnhandled: _exitRemote,
+                child: scaffold,
+              )
+            : scaffold;
         // This application owns a nested Navigator. Guard its enclosing route
         // too, so Cupertino's outer edge recognizer cannot remove the entire
         // container before the guest's back-input listener receives the drag.
@@ -714,38 +763,7 @@ final class _PocketSystemHostApplicationState
                     // The mounted PocketSystemHost boundary owns guest Back.
                     if (!didPop && canExit && !systemHostMounted) _exitRemote();
                   },
-                  child: _PocketEdgeBackListener(
-                    onGesture: (!systemHostMounted && canExit)
-                        ? (input) {
-                            if (input['phase'] == 'end' &&
-                                input['fallbackCompleted'] == true)
-                              _exitRemote();
-                          }
-                        : null,
-                    child: Scaffold(
-                      appBar: canExit
-                          ? AppBar(
-                              backgroundColor: widget.backgroundColor,
-                              foregroundColor:
-                                  widget.backgroundColor.computeLuminance() >
-                                      0.179
-                                  ? Colors.black
-                                  : Colors.white,
-                              leading: IconButton(
-                                key: const ValueKey('pocket-container-exit'),
-                                tooltip: '返回退出',
-                                icon: const Icon(Icons.arrow_back),
-                                onPressed: _exitRemote,
-                              ),
-                              title: const Text('远程容器'),
-                            )
-                          : null,
-                      backgroundColor: bootstrap == null || error != null
-                          ? widget.backgroundColor
-                          : null,
-                      body: body,
-                    ),
-                  ),
+                  child: homeContent,
                 ),
               ),
             ),
@@ -784,6 +802,8 @@ final class PocketSystemHost extends StatefulWidget {
     this.onClose,
     this.cacheFirst = false,
     this.backgroundColor = const Color(0xFF000000),
+    this.nativeEdgeExitEnabled = true,
+    this.nativeExitRoute,
   });
 
   /// Construct the host from one bootstrap document.
@@ -806,6 +826,8 @@ final class PocketSystemHost extends StatefulWidget {
     VoidCallback? onClose,
     bool cacheFirst = false,
     Color backgroundColor = const Color(0xFF000000),
+    bool nativeEdgeExitEnabled = true,
+    TransitionRoute<dynamic>? nativeExitRoute,
   }) {
     PocketAppConfig approveRoot(PocketAppConfig value) =>
         approveSystemUI?.call(value) ?? value;
@@ -867,6 +889,8 @@ final class PocketSystemHost extends StatefulWidget {
       onClose: onClose,
       cacheFirst: cacheFirst,
       backgroundColor: backgroundColor,
+      nativeEdgeExitEnabled: nativeEdgeExitEnabled,
+      nativeExitRoute: nativeExitRoute,
     );
   }
 
@@ -912,6 +936,14 @@ final class PocketSystemHost extends StatefulWidget {
   /// Opaque root fill for the SystemUI surface, including startup and error
   /// states. Child compositor sessions stay transparent and reveal this fill.
   final Color backgroundColor;
+
+  /// Whether an unhandled native edge swipe may leave this host container.
+  /// Pocket guest back gestures are still delivered when this is false.
+  final bool nativeEdgeExitEnabled;
+
+  /// Optional enclosing route to preview when this host is below a nested
+  /// Navigator. Usually supplied automatically by PocketSystemHostApplication.
+  final TransitionRoute<dynamic>? nativeExitRoute;
 
   @override
   State<PocketSystemHost> createState() => _PocketSystemHostState();
@@ -1633,6 +1665,8 @@ final class _PocketSystemHostState extends State<PocketSystemHost>
     }
     return _PocketBackInputBoundary(
       controller: _controller,
+      nativeEdgeExitEnabled: widget.nativeEdgeExitEnabled,
+      nativeExitRoute: widget.nativeExitRoute ?? ModalRoute.of(context),
       onUnhandled: () {
         if (widget.onClose case final close?) {
           close();
@@ -3874,11 +3908,15 @@ final class _MiniAppBootstrapFacts {
 final class _PocketBackInputBoundary extends StatefulWidget {
   const _PocketBackInputBoundary({
     required this.controller,
+    required this.nativeEdgeExitEnabled,
+    required this.nativeExitRoute,
     required this.onUnhandled,
     required this.child,
   });
 
   final PocketSystemHostController controller;
+  final bool nativeEdgeExitEnabled;
+  final TransitionRoute<dynamic>? nativeExitRoute;
   final VoidCallback onUnhandled;
   final Widget child;
 
@@ -3892,6 +3930,19 @@ final class _PocketBackInputBoundaryState
   bool _backPending = false;
   String? _gestureId;
   Future<bool>? _gestureAcceptance;
+  bool? _gestureHandled;
+  Map<String, dynamic>? _latestGesture;
+  TransitionRoute<dynamic>? _gestureExitRoute;
+  TransitionRoute<dynamic>? _nativePreviewRoute;
+
+  @override
+  void didUpdateWidget(covariant _PocketBackInputBoundary oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if ((oldWidget.nativeEdgeExitEnabled && !widget.nativeEdgeExitEnabled) ||
+        oldWidget.nativeExitRoute != widget.nativeExitRoute) {
+      _cancelNativePreview();
+    }
+  }
 
   void _onGesture(Map<String, dynamic> input) {
     final id = input['gestureId'] as String;
@@ -3899,26 +3950,104 @@ final class _PocketBackInputBoundaryState
     if (phase == 'start') {
       if (_backPending) return;
       _gestureId = id;
-      _gestureAcceptance = widget.controller._beginBackGesture(input);
+      _gestureHandled = null;
+      _gestureExitRoute = widget.nativeExitRoute;
+      _latestGesture = Map<String, dynamic>.of(input);
+      final acceptance = widget.controller._beginBackGesture(input);
+      _gestureAcceptance = acceptance;
+      unawaited(_startNativePreviewAfterDecline(id, acceptance));
       return;
     }
     if (_gestureId != id) return;
+    _latestGesture = Map<String, dynamic>.of(input);
     widget.controller._updateBackGesture(input);
+    if (_gestureHandled == false && (phase == 'update' || phase == 'end')) {
+      _updateNativePreview(input);
+    }
     if (phase != 'end' && phase != 'cancel') return;
     final acceptance = _gestureAcceptance;
     unawaited(() async {
-      final handled = await (acceptance ?? Future<bool>.value(false));
+      final handled = await _resolvedAcceptance(
+        acceptance ?? Future<bool>.value(false),
+      );
       if (!mounted || _gestureId != id) return;
+      _gestureHandled = handled;
       _gestureId = null;
       _gestureAcceptance = null;
+      _latestGesture = null;
+      if (handled || phase == 'cancel') {
+        _cancelNativePreview();
+        _gestureExitRoute = null;
+        return;
+      }
+      if (phase == 'end') _updateNativePreview(input);
       final lifecycle = WidgetsBinding.instance.lifecycleState;
       if (!handled &&
           phase == 'end' &&
           input['fallbackCompleted'] == true &&
           (lifecycle == null || lifecycle == AppLifecycleState.resumed)) {
         await _requestBack(source: 'edgeGesture');
+      } else {
+        _cancelNativePreview();
+        _gestureExitRoute = null;
       }
     }());
+  }
+
+  Future<void> _startNativePreviewAfterDecline(
+    String gestureId,
+    Future<bool> acceptance,
+  ) async {
+    final handled = await _resolvedAcceptance(acceptance);
+    if (!mounted || _gestureId != gestureId) return;
+    _gestureHandled = handled;
+    if (handled) return;
+    final latest = _latestGesture;
+    if (latest != null && latest['phase'] != 'cancel') {
+      _updateNativePreview(latest);
+    }
+  }
+
+  Future<bool> _resolvedAcceptance(Future<bool> acceptance) async {
+    try {
+      return await acceptance;
+    } on Object {
+      return false;
+    }
+  }
+
+  void _updateNativePreview(Map<String, dynamic> input) {
+    if (!widget.nativeEdgeExitEnabled || input['phase'] == 'cancel') return;
+    final rawProgress = input['progress'];
+    final progress = rawProgress is num
+        ? rawProgress.toDouble().clamp(0.0, 1.0)
+        : 0.0;
+    var route = _nativePreviewRoute;
+    if (route == null) {
+      route = _gestureExitRoute ?? widget.nativeExitRoute;
+      if (route == null ||
+          !route.isCurrent ||
+          route.navigator?.canPop() != true ||
+          route.animation?.isCompleted != true) {
+        return;
+      }
+      route.handleStartBackGesture(progress: 1.0 - progress);
+      _nativePreviewRoute = route;
+      return;
+    }
+    if (!route.isCurrent) {
+      _cancelNativePreview();
+      return;
+    }
+    route.handleUpdateBackGestureProgress(progress: 1.0 - progress);
+  }
+
+  void _cancelNativePreview() {
+    final route = _nativePreviewRoute;
+    _nativePreviewRoute = null;
+    // TransitionRoute's cancel path both restores an unpopped route and
+    // balances didStartUserGesture after a pop already began.
+    route?.handleCancelBackGesture();
   }
 
   @override
@@ -3929,6 +4058,12 @@ final class _PocketBackInputBoundaryState
         'gestureId': id,
         'phase': 'cancel',
       });
+    _gestureId = null;
+    _gestureAcceptance = null;
+    _gestureHandled = null;
+    _latestGesture = null;
+    _gestureExitRoute = null;
+    _cancelNativePreview();
     super.dispose();
   }
 
@@ -3943,7 +4078,22 @@ final class _PocketBackInputBoundaryState
         handled = false;
       }
       debugPrint('[PocketBack] boundary($source): handled=$handled');
-      if (mounted && !handled) widget.onUnhandled();
+      if (source == 'edgeGesture') {
+        try {
+          final exitRoute = _gestureExitRoute;
+          if (mounted &&
+              !handled &&
+              widget.nativeEdgeExitEnabled &&
+              (exitRoute == null || exitRoute.isCurrent)) {
+            widget.onUnhandled();
+          }
+        } finally {
+          _cancelNativePreview();
+          _gestureExitRoute = null;
+        }
+      } else if (mounted && !handled) {
+        widget.onUnhandled();
+      }
     } finally {
       _backPending = false;
     }

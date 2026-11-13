@@ -133,14 +133,18 @@ void main() {
             findsOneWidget,
             reason: 'a cancelled edge gesture must retain the container',
           );
+          // A declined gesture briefly previews the enclosing route; let its
+          // native cancel animation restore the app before starting another
+          // pointer sequence from the physical edge.
+          await tester.pump(const Duration(milliseconds: 400));
           final swipe = await tester.createGesture(pointer: 2);
           await swipe.down(
             const Offset(8, 200),
-            timeStamp: const Duration(milliseconds: 900),
+            timeStamp: const Duration(milliseconds: 1300),
           );
           await swipe.moveTo(
             const Offset(120, 200),
-            timeStamp: const Duration(milliseconds: 1100),
+            timeStamp: const Duration(milliseconds: 1500),
           );
           await tester.pump();
           expect(
@@ -149,7 +153,7 @@ void main() {
             reason: 'the container waits for the edge gesture end phase',
           );
           expect(pending.isCompleted, isFalse);
-          await swipe.up(timeStamp: const Duration(milliseconds: 1150));
+          await swipe.up(timeStamp: const Duration(milliseconds: 1550));
       }
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 550));

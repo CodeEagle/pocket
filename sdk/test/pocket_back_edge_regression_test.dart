@@ -21,6 +21,8 @@ import 'package:pocket_flutter/pocket_flutter.dart'
 import 'package:pocket_sdk/src/pocket_config.dart';
 import 'package:pocket_sdk/src/pocket_system_host.dart';
 
+const String _rootId = 'pocket.back-edge-regression.root';
+
 final class _ProbeRuntime
     implements PocketRuntime, PocketCompositorRuntime, PocketBytecodeRuntime {
   final List<Map<String, dynamic>> sentMessages = <Map<String, dynamic>>[];
@@ -77,7 +79,7 @@ final class _ProbeRuntime
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
-  const rootId = 'pocket.back-edge-regression.root';
+  const rootId = _rootId;
   late Directory directory;
 
   setUp(() {
@@ -170,6 +172,7 @@ void main() {
                   ),
                   applications: const <String, PocketAppConfig>{},
                   controller: controller,
+                  nativeEdgeExitEnabled: false,
                   onClose: () => closes++,
                 ),
               ),
@@ -569,6 +572,368 @@ void main() {
       }
     },
   );
+
+  testWidgets(
+    'declined edge preview pops the captured outer route after Back declines',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+      final controller = PocketSystemHostController();
+      final runtime = _ProbeRuntime();
+      final routeObserver = _BackGestureObserver();
+      debugPocketSelfOwnedRuntimeFactory = (_) => runtime;
+
+      try {
+        final hostRoute = (await _pushBackEdgeHost(
+          tester,
+          controller,
+          navigatorObserver: routeObserver,
+          onCloseForContext: (context) =>
+              () => Navigator.of(context).pop(),
+        )).$2;
+        final root = await _waitForRoot(tester, controller);
+        await tester.pump(const Duration(milliseconds: 500));
+
+        final accepted = await tester.createGesture(pointer: 1);
+        await accepted.down(const Offset(8, 200), timeStamp: Duration.zero);
+        await tester.pump();
+        final acceptedStart = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, acceptedStart, handled: true);
+        await tester.pump();
+        await accepted.moveTo(
+          const Offset(100, 200),
+          timeStamp: const Duration(milliseconds: 100),
+        );
+        await accepted.up(timeStamp: const Duration(milliseconds: 120));
+        await tester.pump();
+        expect(routeObserver.starts, 0);
+        expect(_backRequests(runtime), isEmpty);
+        expect(hostRoute.animation!.value, 1);
+
+        final handledGesture = await tester.createGesture(pointer: 2);
+        await handledGesture.down(
+          const Offset(8, 200),
+          timeStamp: const Duration(milliseconds: 200),
+        );
+        await tester.pump();
+        final declinedStart = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, declinedStart, handled: false);
+        await tester.pump();
+        await handledGesture.moveTo(
+          const Offset(208, 200),
+          timeStamp: const Duration(milliseconds: 300),
+        );
+        await tester.pump();
+        expect(routeObserver.starts, 1);
+        expect(hostRoute.animation!.value, lessThan(1));
+        await handledGesture.up(timeStamp: const Duration(milliseconds: 320));
+        await tester.pump();
+
+        final handledRequest = await _waitForBackRequest(tester, runtime);
+        root.session.onEvent(
+          PocketEvent(
+            id: 'outer-exit-back-handled',
+            method: 'platform.back.response',
+            params: <String, Object?>{
+              'requestId': (handledRequest['payload'] as Map)['requestId'],
+              'handled': true,
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(hostRoute.isCurrent, isTrue);
+        expect(hostRoute.animation!.value, 1);
+        expect(routeObserver.starts, 1);
+        expect(routeObserver.stops, 1);
+
+        final exitGesture = await tester.createGesture(pointer: 3);
+        await exitGesture.down(
+          const Offset(8, 200),
+          timeStamp: const Duration(milliseconds: 1000),
+        );
+        await tester.pump();
+        final exitStart = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, exitStart, handled: false);
+        await tester.pump();
+        await exitGesture.moveTo(
+          const Offset(208, 200),
+          timeStamp: const Duration(milliseconds: 1100),
+        );
+        await tester.pump();
+        expect(routeObserver.starts, 2);
+        expect(hostRoute.animation!.value, lessThan(1));
+        await exitGesture.up(timeStamp: const Duration(milliseconds: 1120));
+        await tester.pump();
+
+        final exitRequest = await _waitForBackRequest(tester, runtime);
+        root.session.onEvent(
+          PocketEvent(
+            id: 'outer-exit-back-declined',
+            method: 'platform.back.response',
+            params: <String, Object?>{
+              'requestId': (exitRequest['payload'] as Map)['requestId'],
+              'handled': false,
+            },
+          ),
+        );
+        await tester.pump();
+        expect(hostRoute.isCurrent, isFalse);
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(routeObserver.pops, 1);
+        expect(routeObserver.stops, 2);
+        expect(find.text('Home'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        controller.dispose();
+        debugPocketSelfOwnedRuntimeFactory = previousFactory;
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets(
+    'disabled native edge exit still forwards guest gestures without popping',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+      final controller = PocketSystemHostController();
+      final runtime = _ProbeRuntime();
+      final routeObserver = _BackGestureObserver();
+      debugPocketSelfOwnedRuntimeFactory = (_) => runtime;
+      var closes = 0;
+
+      try {
+        final hostRoute = (await _pushBackEdgeHost(
+          tester,
+          controller,
+          navigatorObserver: routeObserver,
+          nativeEdgeExitEnabled: false,
+          onCloseForContext: (_) =>
+              () => closes++,
+        )).$2;
+        final root = await _waitForRoot(tester, controller);
+        await tester.pump(const Duration(milliseconds: 500));
+
+        final declined = await tester.createGesture(pointer: 2);
+        await declined.down(const Offset(8, 200), timeStamp: Duration.zero);
+        await tester.pump();
+        final declinedStart = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, declinedStart, handled: false);
+        await tester.pump();
+        await declined.moveTo(
+          const Offset(208, 200),
+          timeStamp: const Duration(milliseconds: 100),
+        );
+        await declined.up(timeStamp: const Duration(milliseconds: 120));
+        await tester.pump();
+        final request = await _waitForBackRequest(tester, runtime);
+        expect(routeObserver.starts, 0);
+        expect(hostRoute.animation!.value, 1);
+        root.session.onEvent(
+          PocketEvent(
+            id: 'disabled-edge-back-declined',
+            method: 'platform.back.response',
+            params: <String, Object?>{
+              'requestId': (request['payload'] as Map)['requestId'],
+              'handled': false,
+            },
+          ),
+        );
+        await tester.pump();
+        expect(closes, 0);
+        expect(hostRoute.isCurrent, isTrue);
+
+        final acceptedIndex = _backGestures(runtime).length;
+        final accepted = await tester.createGesture(pointer: 3);
+        await accepted.down(
+          const Offset(8, 200),
+          timeStamp: const Duration(milliseconds: 200),
+        );
+        await tester.pump();
+        final acceptedStart = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, acceptedStart, handled: true);
+        await tester.pump();
+        await accepted.moveTo(
+          const Offset(100, 200),
+          timeStamp: const Duration(milliseconds: 240),
+        );
+        await accepted.up(timeStamp: const Duration(milliseconds: 250));
+        await tester.pump();
+        expect(
+          _backGestures(runtime)
+              .skip(acceptedIndex)
+              .map((message) => message['payload']['phase'])
+              .toList(),
+          <Object?>['start', 'update', 'end'],
+        );
+        expect(_backRequests(runtime), hasLength(1));
+        expect(routeObserver.starts, 0);
+        expect(closes, 0);
+        expect(hostRoute.isCurrent, isTrue);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        controller.dispose();
+        debugPocketSelfOwnedRuntimeFactory = previousFactory;
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets(
+    'late declined Back cannot pop the route below an externally popped host',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final previousFactory = debugPocketSelfOwnedRuntimeFactory;
+      final controller = PocketSystemHostController();
+      final runtime = _ProbeRuntime();
+      final routeObserver = _BackGestureObserver();
+      debugPocketSelfOwnedRuntimeFactory = (_) => runtime;
+      var closes = 0;
+
+      try {
+        final (navigator, hostRoute) = await _pushBackEdgeHost(
+          tester,
+          controller,
+          navigatorObserver: routeObserver,
+          onCloseForContext: (_) =>
+              () => closes++,
+        );
+        final root = await _waitForRoot(tester, controller);
+        await tester.pump(const Duration(milliseconds: 500));
+
+        final gesture = await tester.createGesture(pointer: 4);
+        await gesture.down(const Offset(8, 200), timeStamp: Duration.zero);
+        await tester.pump();
+        final start = _lastBackGesture(runtime, phase: 'start');
+        _replyToBackGesture(root, start, handled: false);
+        await tester.pump();
+        await gesture.moveTo(
+          const Offset(208, 200),
+          timeStamp: const Duration(milliseconds: 100),
+        );
+        await gesture.up(timeStamp: const Duration(milliseconds: 120));
+        await tester.pump();
+        final request = await _waitForBackRequest(tester, runtime);
+
+        navigator.pop();
+        await tester.pump();
+        root.session.onEvent(
+          PocketEvent(
+            id: 'late-back-after-host-pop',
+            method: 'platform.back.response',
+            params: <String, Object?>{
+              'requestId': (request['payload'] as Map)['requestId'],
+              'handled': false,
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(hostRoute.isCurrent, isFalse);
+        expect(routeObserver.pops, 1);
+        expect(routeObserver.starts, 1);
+        expect(routeObserver.stops, 1);
+        expect(closes, 0);
+        expect(find.text('Home'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        controller.dispose();
+        debugPocketSelfOwnedRuntimeFactory = previousFactory;
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+}
+
+Future<(NavigatorState, MaterialPageRoute<void>)> _pushBackEdgeHost(
+  WidgetTester tester,
+  PocketSystemHostController controller, {
+  required VoidCallback Function(BuildContext context) onCloseForContext,
+  NavigatorObserver? navigatorObserver,
+  bool nativeEdgeExitEnabled = true,
+}) async {
+  late BuildContext homeContext;
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: ThemeData.light(),
+      navigatorObservers: <NavigatorObserver>[
+        if (navigatorObserver != null) navigatorObserver,
+      ],
+      home: Builder(
+        builder: (context) {
+          homeContext = context;
+          return const Scaffold(body: Center(child: Text('Home')));
+        },
+      ),
+    ),
+  );
+  final route = MaterialPageRoute<void>(
+    settings: const RouteSettings(name: 'pocket-back-edge-route-test'),
+    builder: (context) => Scaffold(
+      body: PocketSystemHost(
+        systemUI: const PocketAppConfig(
+          appId: _rootId,
+          bytecodeAsset: 'test/back-edge-root.qjbc',
+          pakAsset: 'test/back-edge-root.pak',
+          metadataAsset: 'test/back-edge-root.metadata.json',
+          manifestAsset: 'test/back-edge-root.manifest.json',
+          additionalCapabilities: <String>{'ui.compositor-surfaces'},
+        ),
+        applications: const <String, PocketAppConfig>{},
+        controller: controller,
+        nativeEdgeExitEnabled: nativeEdgeExitEnabled,
+        onClose: onCloseForContext(context),
+      ),
+    ),
+  );
+  unawaited(Navigator.of(homeContext).push<void>(route));
+  await tester.pump();
+  return (Navigator.of(homeContext), route);
+}
+
+Future<Map<String, dynamic>> _waitForBackRequest(
+  WidgetTester tester,
+  _ProbeRuntime runtime,
+) async {
+  for (var attempt = 0; attempt < 30; attempt++) {
+    final requests = _backRequests(runtime);
+    if (requests.isNotEmpty) {
+      return requests.last;
+    }
+    await tester.pump(const Duration(milliseconds: 16));
+  }
+  fail('Timed out waiting for platform.back.request');
+}
+
+final class _BackGestureObserver extends NavigatorObserver {
+  int starts = 0;
+  int stops = 0;
+  int pops = 0;
+
+  @override
+  void didStartUserGesture(
+    Route<dynamic> route,
+    Route<dynamic>? previousRoute,
+  ) {
+    starts++;
+    super.didStartUserGesture(route, previousRoute);
+  }
+
+  @override
+  void didStopUserGesture() => stops++;
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    pops++;
+    super.didPop(route, previousRoute);
+  }
 }
 
 List<Map<String, dynamic>> _backRequests(_ProbeRuntime runtime) => runtime
