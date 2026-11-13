@@ -76,6 +76,8 @@ class TestHost implements HostBridge {
   readonly destroyed: string[] = [];
   readonly generations = new Map<string, string>();
   readonly appIds = new Map<string, string>();
+  private readonly tickListeners = new Set<() => void>();
+  get activeTickListenerCount(): number { return this.tickListeners.size; }
   disposed = false;
   private nextInstance = 1;
 
@@ -131,8 +133,20 @@ class TestHost implements HostBridge {
   }
 
   handle(): boolean { return false; }
-  tick(): void {}
-  dispose(): void { this.disposed = true; }
+  onTick(listener: () => void): () => void {
+    this.tickListeners.add(listener);
+    return () => this.tickListeners.delete(listener);
+  }
+  advanceTicks(count: number): void {
+    for (let tick = 0; tick < count; tick += 1) {
+      for (const listener of [...this.tickListeners]) listener();
+    }
+  }
+  tick(): void { this.advanceTicks(1); }
+  dispose(): void {
+    this.disposed = true;
+    this.tickListeners.clear();
+  }
 }
 
 const globalObject = globalThis as typeof globalThis & {
@@ -159,7 +173,9 @@ function createEnv(maxResidentApps = 5) {
     const start = host.calls.length;
     globalObject.__pocketEvent!({ type: "event", name: "system.request", payload: req });
     for (let i = 0; i < 50; i++) {
-      const resp = host.calls.slice(start).find((c) => c.capability === "system.runtime.respond");
+      const resp = host.calls.slice(start).find((c) =>
+        c.capability === "system.runtime.respond" && c.params.requestId === req.requestId,
+      );
       if (resp) return resp.params;
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -798,6 +814,163 @@ test("a cold open reports preparing and first-frame stages until its first frame
   } finally { finish(); finishFrame(); unsubscribe(); kernel.dispose(); }
 });
 
+test("a cold open shares one preparation deadline and destroys a child whose prepare exceeds it", async () => {
+  const { host, kernel, invoke } = createEnv();
+  await kernel.ready;
+  const request = host.request.bind(host);
+  host.request = async (capability, params = {}, options) => {
+    const value = await request(capability, params, options);
+    if (capability === "system.runtime.create") host.advanceTicks(150 * 60);
+    if (capability === "system.runtime.prepareOpen") {
+      assert.equal(options?.timeoutFrames, 30 * 60, "prepare receives only the create remainder");
+      host.advanceTicks(30 * 60);
+    }
+    return value as never;
+  };
+  try {
+    const result = await invoke(systemRequest("cold-open-deadline", "platform.apps.open", { appId: PROFILE }));
+    assert.equal(result.ok, false);
+    assert.equal((result.error as JsonObject).code, "request_timeout");
+    const instanceId = [...host.appIds].find(([, appId]) => appId === PROFILE)![0];
+    assert.equal(host.calls.find((call) => call.capability === "system.runtime.create")?.options?.timeoutFrames, 180 * 60);
+    assert.deepEqual(host.destroyed.filter((destroyedId) => destroyedId === instanceId), [instanceId]);
+    assert.equal(kernel.snapshot().residents.some((record) => record.instanceId === instanceId), false);
+    assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
+    assert.equal(kernel.snapshot().opening, null);
+    assert.equal(host.calls.some((call) => call.capability === "system.runtime.awaitFirstFrame"), false);
+    assert.equal(host.posted.some((event) => event.instanceId === "system-ui" && event.params.state === "onWillDisappear"), false);
+  } finally { kernel.dispose(); }
+});
+
+test("an exhausted open deadline leaves a prewarmed resident reusable and restores its presentation style", async () => {
+  const { host, kernel, invoke } = createEnv();
+  await kernel.ready;
+  assert.equal((await invoke(systemRequest("warm-deadline-resident", "platform.apps.prewarm", { appId: PROFILE }))).ok, true);
+  const instanceId = kernel.snapshot().residents.find((record) => record.appId === PROFILE)!.instanceId;
+  const request = host.request.bind(host);
+  let expirePrepare = true;
+  host.request = async (capability, params = {}, options) => {
+    const value = await request(capability, params, options);
+    if (capability === "system.runtime.prepareOpen" && expirePrepare) {
+      assert.equal(options?.timeoutFrames, 180 * 60);
+      expirePrepare = false;
+      host.advanceTicks(180 * 60);
+    }
+    return value as never;
+  };
+  try {
+    const failed = await invoke(systemRequest("resident-open-deadline", "platform.apps.open", {
+      appId: PROFILE,
+      presentationStyle: "page",
+    }));
+    assert.equal(failed.ok, false);
+    assert.equal((failed.error as JsonObject).code, "request_timeout");
+    assert.deepEqual(host.destroyed.filter((destroyedId) => destroyedId === instanceId), []);
+    assert.equal(kernel.snapshot().residents.find((record) => record.instanceId === instanceId)?.prewarmed, true);
+    assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
+    assert.equal(host.calls.some((call) => call.capability === "system.runtime.awaitFirstFrame"), false);
+
+    const retry = await invoke(systemRequest("resident-open-deadline-retry", "platform.apps.open", { appId: PROFILE }));
+    assert.equal(retry.ok, true);
+    assert.equal(host.calls.filter((call) => call.capability === "system.runtime.create" && call.params.appId === PROFILE).length, 1);
+    assert.equal(kernel.surfaceBindings()[0]?.presentationStyle, "sheet");
+  } finally { kernel.dispose(); }
+});
+
+test("a queued open spends its request-receipt budget before creating a late child", async () => {
+  const { host, kernel, invoke } = createEnv();
+  await kernel.ready;
+  const request = host.request.bind(host);
+  let releaseFirstPrepare!: () => void;
+  let markFirstPrepareStarted!: () => void;
+  const firstPrepareGate = new Promise<void>((resolve) => { releaseFirstPrepare = resolve; });
+  const firstPrepareStarted = new Promise<void>((resolve) => { markFirstPrepareStarted = resolve; });
+  let heldProfilePrepare = false;
+  host.request = async (capability, params = {}, options) => {
+    const value = await request(capability, params, options);
+    if (capability === "system.runtime.prepareOpen" &&
+        host.appIds.get(String(params.instanceId)) === PROFILE && !heldProfilePrepare) {
+      heldProfilePrepare = true;
+      markFirstPrepareStarted();
+      await firstPrepareGate;
+      host.advanceTicks(179 * 60);
+    }
+    if (capability === "system.runtime.create" && params.appId === LOBBY) {
+      assert.equal(host.activeTickListenerCount, 1, "the queued open budget remains active through its host request");
+      assert.equal(options?.timeoutFrames, 60, "the queued request retains only its time remaining after queue wait");
+      host.advanceTicks(61);
+    }
+    return value as never;
+  };
+  try {
+    const firstOpen = invoke(systemRequest("queue-budget-first", "platform.apps.open", { appId: PROFILE }));
+    await firstPrepareStarted;
+    assert.equal(host.activeTickListenerCount, 1);
+    const profileInstanceId = [...host.appIds].find(([, appId]) => appId === PROFILE)![0];
+    const queuedOpen = invoke({
+      requestId: "queue-budget-second",
+      sourceAppId: PROFILE,
+      sourceInstanceId: profileInstanceId,
+      sourceGeneration: host.generations.get(profileInstanceId)!,
+      capability: "platform.apps.open",
+      params: { appId: LOBBY },
+    });
+    assert.equal(host.activeTickListenerCount, 2, "queued opens start consuming their deadline when received");
+    releaseFirstPrepare();
+
+    assert.equal((await firstOpen).ok, true);
+    const failed = await queuedOpen;
+    assert.equal(failed.ok, false);
+    assert.equal((failed.error as JsonObject).code, "request_timeout");
+    const lobbyInstanceId = [...host.appIds].find(([, appId]) => appId === LOBBY)![0];
+    assert.deepEqual(host.destroyed.filter((destroyedId) => destroyedId === lobbyInstanceId), [lobbyInstanceId]);
+    assert.equal(kernel.snapshot().residents.some((record) => record.instanceId === lobbyInstanceId), false);
+    assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI, PROFILE]);
+    assert.equal(host.calls.some((call) => call.capability === "system.runtime.prepareOpen" &&
+      call.params.instanceId === lobbyInstanceId), false);
+    assert.equal(host.calls.some((call) => call.capability === "system.runtime.awaitFirstFrame" &&
+      call.params.instanceId === lobbyInstanceId), false);
+  } finally {
+    releaseFirstPrepare();
+    kernel.dispose();
+  }
+});
+
+test("a queued open releases its tick deadline if the kernel is disposed before admission", async () => {
+  const { host, kernel } = createEnv();
+  await kernel.ready;
+  const request = host.request.bind(host);
+  let releaseUpdatePrepare!: () => void;
+  let markUpdatePrepareStarted!: () => void;
+  const updatePrepareGate = new Promise<void>((resolve) => { releaseUpdatePrepare = resolve; });
+  const updatePrepareStarted = new Promise<void>((resolve) => { markUpdatePrepareStarted = resolve; });
+  host.request = async (capability, params = {}, options) => {
+    const value = await request(capability, params, options);
+    if (capability === "system.runtime.appUpdatePrepare") {
+      markUpdatePrepareStarted();
+      await updatePrepareGate;
+    }
+    return value as never;
+  };
+  try {
+    globalObject.__pocketEvent!({ type: "event", name: "system.request", payload: systemRequest(
+      "blocked-update-prepare", "platform.apps.update.prepare", { appId: PROFILE },
+    ) });
+    await updatePrepareStarted;
+    globalObject.__pocketEvent!({ type: "event", name: "system.request", payload: systemRequest(
+      "queued-open-dispose", "platform.apps.open", { appId: PROFILE },
+    ) });
+    assert.equal(host.activeTickListenerCount, 1);
+    kernel.dispose();
+    releaseUpdatePrepare();
+    await until(() => host.activeTickListenerCount === 0);
+    assert.equal(host.calls.some((call) => call.capability === "system.runtime.create" && call.params.appId === PROFILE), false);
+  } finally {
+    releaseUpdatePrepare();
+    kernel.dispose();
+  }
+});
+
 test("a prewarmed update adopts its new generation before presentation and replays init only once", async () => {
   const { host, kernel, invoke } = createEnv();
   await kernel.ready;
@@ -873,7 +1046,7 @@ test("a failed pre-entry update leaves the caller and prewarmed instance availab
   } finally { kernel.dispose(); }
 });
 
-test("a cold-open preparation response with stale package facts keeps the page hidden", async () => {
+test("a cold-open preparation response with stale package facts destroys the hidden child", async () => {
   const { host, kernel, invoke } = createEnv();
   await kernel.ready;
   const request = host.request.bind(host);
@@ -889,10 +1062,9 @@ test("a cold-open preparation response with stale package facts keeps the page h
     assert.equal(result.ok, false);
     assert.equal((result.error as JsonObject).code, "host_protocol_error");
     assert.deepEqual(kernel.snapshot().stack.map((frame) => frame.appId), [SYSTEM_UI]);
-    const resident = kernel.snapshot().residents.find((entry) => entry.appId === PROFILE);
-    assert.ok(resident, "the hidden child runtime remains available for retry");
-    assert.equal(resident.prewarmed, false);
-    assert.equal(resident.state, "suspended");
+    assert.equal(kernel.snapshot().residents.some((entry) => entry.appId === PROFILE), false);
+    const instanceId = [...host.appIds].find(([, appId]) => appId === PROFILE)![0];
+    assert.deepEqual(host.destroyed.filter((destroyedId) => destroyedId === instanceId), [instanceId]);
   } finally { kernel.dispose(); }
 });
 

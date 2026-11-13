@@ -320,6 +320,39 @@ interface DispatchOutcome {
   cleanupInstanceIds?: string[];
 }
 
+interface OpenTimeoutBudget {
+  timeoutFrames(maxFrames: number): number;
+  assertActive(): void;
+  dispose(): void;
+}
+
+function createOpenTimeoutBudget(bridge: HostBridge, totalFrames: number): OpenTimeoutBudget {
+  let elapsedFrames = 0;
+  const removeTick = bridge.onTick?.(() => { elapsedFrames += 1; });
+  const startedAt = globalThis.performance?.now?.() ?? Date.now();
+  const remainingFrames = (): number => {
+    const elapsed = removeTick
+      ? elapsedFrames
+      : Math.ceil(((globalThis.performance?.now?.() ?? Date.now()) - startedAt) * simulationHz() / 1000);
+    const remaining = totalFrames - elapsed;
+    if (remaining < 1) {
+      throw new PocketSystemError("request_timeout", "App open exceeded its 180-second deadline");
+    }
+    return remaining;
+  };
+  return {
+    timeoutFrames(maxFrames) {
+      return Math.min(maxFrames, remainingFrames());
+    },
+    assertActive() {
+      remainingFrames();
+    },
+    dispose() {
+      removeTick?.();
+    },
+  };
+}
+
 class PocketSystemError extends Error {
   readonly code: string;
 
@@ -682,10 +715,14 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.target = globalThis as typeof globalThis & { __pocketEvent?: HostPacketHandler };
     const handleEvent = (name: string, payload: unknown): void => {
       if (name === "system.request") {
-        void this.enqueue(async () => {
-          await this.handleSystemRequest(payload);
+        const openBudget = isRecord(payload) && payload.capability === "platform.apps.open"
+          ? createOpenTimeoutBudget(this.bridge, 180 * simulationHz())
+          : undefined;
+        const transaction = this.enqueue(async () => {
+          await this.handleSystemRequest(payload, openBudget);
           await this.flushForegroundWork();
         });
+        void transaction.finally(() => openBudget?.dispose()).catch(() => {});
       } else if (name === "system.runtime.failed" || name === "system.runtime.closed") {
         void this.enqueue(async () => {
           await this.handleRuntimeTermination(payload, name === "system.runtime.failed");
@@ -802,12 +839,13 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }];
   }
 
-  private async emitPresets(record: RuntimeRecord): Promise<boolean> {
+  private async emitPresets(record: RuntimeRecord, budget?: OpenTimeoutBudget): Promise<boolean> {
     const resolved = this.presetsForApp(record.appId, record.instanceId);
     const accepted = await this.post(
       record,
       SYSTEM_PRESETS_EVENT,
       systemPresetsBridgeObject(resolved) as JsonObject,
+      budget,
     );
     record.presetsPending = !accepted;
     return accepted;
@@ -1054,15 +1092,28 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async hostRequest(capability: string, params: JsonObject, options?: HostRequestOptions): Promise<JsonValue> {
+  private async hostRequest(
+    capability: string,
+    params: JsonObject,
+    options?: HostRequestOptions,
+    budget?: OpenTimeoutBudget,
+  ): Promise<JsonValue> {
     this.assertActive();
-    const result = await this.bridge.request<JsonValue>(capability, params, options);
+    const requestOptions = budget
+      ? { ...options, timeoutFrames: budget.timeoutFrames(options?.timeoutFrames ?? 180) }
+      : options;
+    const result = await this.bridge.request<JsonValue>(capability, params, requestOptions);
     this.assertActive();
     return result;
   }
 
-  private async hostObject(capability: string, params: JsonObject, options?: HostRequestOptions): Promise<JsonObject> {
-    const result = await this.hostRequest(capability, params, options);
+  private async hostObject(
+    capability: string,
+    params: JsonObject,
+    options?: HostRequestOptions,
+    budget?: OpenTimeoutBudget,
+  ): Promise<JsonObject> {
+    const result = await this.hostRequest(capability, params, options, budget);
     if (!isRecord(result)) {
       throw new PocketSystemError("host_protocol_error", capability + " must return an object");
     }
@@ -1331,7 +1382,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     if (response.cleanupInstanceIds.length === 0) delete response.cleanupInstanceIds;
   }
 
-  private async handleSystemRequest(payload: unknown): Promise<void> {
+  private async handleSystemRequest(payload: unknown, openBudget?: OpenTimeoutBudget): Promise<void> {
     this.assertActive();
     if (!this.initialized) {
       throw new PocketSystemError("system_not_ready", "Pocket System kernel is not ready");
@@ -1358,7 +1409,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
     let response: StoredResponse;
     try {
-      const outcome = await this.dispatch(request);
+      openBudget?.assertActive();
+      const outcome = await this.dispatch(request, openBudget);
       response = {
         ok: true,
         value: jsonSnapshot(outcome.value, "system response"),
@@ -1377,13 +1429,16 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async dispatch(request: SystemRequest): Promise<DispatchOutcome> {
+  private async dispatch(request: SystemRequest, openBudget?: OpenTimeoutBudget): Promise<DispatchOutcome> {
     if (request.capability === "platform.apps.list") {
       this.authorizeForeground(request);
       return { value: this.listApps() };
     }
     if (request.capability === "platform.apps.open") {
-      return { value: await this.openApp(request) };
+      if (!openBudget) {
+        throw new PocketSystemError("request_timeout", "App open deadline was not initialized");
+      }
+      return { value: await this.openApp(request, openBudget) };
     }
     if (request.capability === "platform.apps.return") {
       return this.returnResult(request);
@@ -1472,7 +1527,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async openApp(request: SystemRequest): Promise<JsonValue> {
+  private async openApp(request: SystemRequest, budget: OpenTimeoutBudget): Promise<JsonValue> {
     const caller = this.authorizeForeground(request);
     const resumeFrame = this.foregroundFrame();
     const resume = this.records.get(resumeFrame.instanceId);
@@ -1509,10 +1564,11 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     this.notifyPresentation();
     try {
       if (created) {
-        await this.ensureCapacity();
-        target = await this.createRuntime(targetAppId, false, launchStyleOverride);
+        await this.ensureCapacity(budget);
+        target = await this.createRuntime(targetAppId, false, launchStyleOverride, budget);
       }
       if (!target) throw new PocketSystemError("runtime_create_failed", "target runtime could not be created");
+      budget.assertActive();
       if (target.closing || target.failed) {
         throw new PocketSystemError("runtime_unavailable", "target runtime is closing or failed");
       }
@@ -1526,14 +1582,15 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       // gate, so a completed older background check cannot make this open
       // skip a release published since that check.
       try {
-        await this.prepareForOpen(target);
+        await this.prepareForOpen(target, budget);
       } catch (error) {
         restoreLaunchPresentationStyle(target);
+        if (created) await this.destroyRuntime(target).catch(() => {});
         throw error;
       }
       try {
-        await this.lifecycle(resume, "onWillDisappear", { targetAppId, requestId: callId });
-        await this.lifecycle(resume, "frozenInStack", { targetAppId, requestId: callId });
+        await this.lifecycle(resume, "onWillDisappear", { targetAppId, requestId: callId }, budget);
+        await this.lifecycle(resume, "frozenInStack", { targetAppId, requestId: callId }, budget);
       } catch (error) {
         await this.lifecycle(resume, "onResume", { targetAppId, requestId: callId, rollback: true }).catch(() => {});
         await this.flushLifecycle(resume).catch(() => {});
@@ -1568,26 +1625,28 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       target.closing = false;
       this.touch(target);
       try {
-        await this.emitPresets(target);
+        await this.emitPresets(target, budget);
         if (created) {
-          await this.lifecycle(target, "onInit", { requestId: callId, prewarmed: false });
-          await this.lifecycle(target, "onLoad", { requestId: callId, prewarmed: false });
+          await this.lifecycle(target, "onInit", { requestId: callId, prewarmed: false }, budget);
+          await this.lifecycle(target, "onLoad", { requestId: callId, prewarmed: false }, budget);
         }
-        await this.lifecycle(target, "onWillAppear", { requestId: callId });
+        await this.lifecycle(target, "onWillAppear", { requestId: callId }, budget);
+        budget.assertActive();
         await this.presentTop();
         this.opening = { appId: targetAppId, stage: "firstFrame" };
         this.notifyPresentation();
-        await this.awaitFirstFrame(target);
-        await this.flushLifecycle(target);
-        const launchAccepted = await this.post(target, "platform.launch", this.launchParams(call));
+        await this.awaitFirstFrame(target, budget);
+        await this.flushLifecycle(target, budget);
+        const launchAccepted = await this.post(target, "platform.launch", this.launchParams(call), budget);
         if (!launchAccepted) {
           throw new PocketSystemError("runtime_unavailable", "target runtime did not accept its launch event");
         }
         call.launchPending = false;
         this.notifyPresentation();
-        await this.lifecycle(target, "onDidAppear", { requestId: callId });
-        await this.flushLifecycle(target);
-        await this.flushForegroundMailbox(targetAppId);
+        await this.lifecycle(target, "onDidAppear", { requestId: callId }, budget);
+        await this.flushLifecycle(target, budget);
+        await this.flushForegroundMailbox(targetAppId, budget);
+        budget.assertActive();
         return {
           requestId: callId,
           targetAppId,
@@ -1616,6 +1675,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     appId: string,
     prewarmed: boolean,
     launchPresentationStyle?: MiniAppPresentationStyle,
+    budget?: OpenTimeoutBudget,
   ): Promise<RuntimeRecord> {
     this.assertActive();
     const catalogEntry = this.catalog.get(appId);
@@ -1633,7 +1693,12 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       }
       createParams.memory = memory;
     }
-    const created = await this.hostObject("system.runtime.create", createParams, { timeoutFrames: 180 * simulationHz() });
+    const created = await this.hostObject(
+      "system.runtime.create",
+      createParams,
+      { timeoutFrames: 180 * simulationHz() },
+      budget,
+    );
     this.assertActive();
     const instanceId = created.instanceId;
     if (!nonEmptyString(instanceId) || instanceId === SYSTEM_UI_INSTANCE_ID) {
@@ -1644,6 +1709,14 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
     if (this.records.has(instanceId) || this.instanceForApp.has(appId)) {
       throw new PocketSystemError("duplicate_runtime", "runtime.create returned an already resident instance");
+    }
+    if (budget) {
+      try {
+        budget.assertActive();
+      } catch (error) {
+        await this.hostRequest("system.runtime.destroy", { instanceId }).catch(() => {});
+        throw error;
+      }
     }
     const record: RuntimeRecord = {
       appId,
@@ -1663,7 +1736,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     return record;
   }
 
-  private async prepareForOpen(record: RuntimeRecord): Promise<void> {
+  private async prepareForOpen(record: RuntimeRecord, budget?: OpenTimeoutBudget): Promise<void> {
     const previousGeneration = record.generation;
     if (previousGeneration === null) {
       throw new PocketSystemError("host_protocol_error", "runtime.create omitted the child generation");
@@ -1673,7 +1746,8 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       generation: previousGeneration,
       cacheFirst: true,
       initialEvents: this.initialEventsForApp(record.appId, record.instanceId),
-    }, { timeoutFrames: 180 * simulationHz() });
+    }, { timeoutFrames: 180 * simulationHz() }, budget);
+    budget?.assertActive();
     this.assertActive();
     const generation = this.readGeneration(prepared.generation);
     if (prepared.instanceId !== record.instanceId || prepared.appId !== record.appId ||
@@ -1691,25 +1765,26 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       appId: record.appId,
       previousGeneration,
       generation,
-    });
+    }, budget);
   }
 
-  private async awaitFirstFrame(record: RuntimeRecord): Promise<void> {
+  private async awaitFirstFrame(record: RuntimeRecord, budget?: OpenTimeoutBudget): Promise<void> {
     if (record.generation === null) {
       throw new PocketSystemError("host_protocol_error", "runtime.create omitted the child generation");
     }
     const ready = await this.hostObject("system.runtime.awaitFirstFrame", {
       instanceId: record.instanceId,
       generation: record.generation,
-    }, { timeoutFrames: 45 * simulationHz() });
+    }, { timeoutFrames: 45 * simulationHz() }, budget);
+    budget?.assertActive();
     if (ready.ready !== true || ready.generation !== record.generation) {
       throw new PocketSystemError("host_protocol_error", "runtime.awaitFirstFrame returned a stale generation");
     }
   }
 
-  private async ensureCapacity(): Promise<void> {
+  private async ensureCapacity(budget?: OpenTimeoutBudget): Promise<void> {
     if (this.records.size < this.maxResidentApps) return;
-    if (!(await this.evictLeastRecentlyUsed())) {
+    if (!(await this.evictLeastRecentlyUsed("lru_eviction", budget))) {
       throw new PocketSystemError("resident_capacity", "resident app limit reached; no unreferenced runtime can be evicted");
     }
   }
@@ -1735,14 +1810,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     return candidates[0];
   }
 
-  private async evictLeastRecentlyUsed(reason: "lru_eviction" | "memory_pressure" = "lru_eviction"): Promise<boolean> {
+  private async evictLeastRecentlyUsed(
+    reason: "lru_eviction" | "memory_pressure" = "lru_eviction",
+    budget?: OpenTimeoutBudget,
+  ): Promise<boolean> {
     const candidate = this.evictionCandidate();
     if (!candidate) return false;
-    await this.lifecycle(candidate, "onWillDisappear", { reason });
-    await this.lifecycle(candidate, "onUnload", { reason });
-    await this.flushLifecycle(candidate);
+    await this.lifecycle(candidate, "onWillDisappear", { reason }, budget);
+    await this.lifecycle(candidate, "onUnload", { reason }, budget);
+    await this.flushLifecycle(candidate, budget);
     candidate.closing = true;
-    await this.destroyRuntime(candidate);
+    await this.destroyRuntime(candidate, budget);
     return true;
   }
 
@@ -1753,7 +1831,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async destroyRuntime(record: RuntimeRecord): Promise<void> {
+  private async destroyRuntime(record: RuntimeRecord, budget?: OpenTimeoutBudget): Promise<void> {
     if (record.instanceId === SYSTEM_UI_INSTANCE_ID) {
       throw new PocketSystemError("system_ui_pinned", "System UI is a non-evictable runtime");
     }
@@ -1769,7 +1847,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       this.notifyPresentation();
     }
     try {
-      await this.hostRequest("system.runtime.destroy", { instanceId: record.instanceId });
+      await this.hostRequest("system.runtime.destroy", { instanceId: record.instanceId }, undefined, budget);
     } catch (error) {
       // Native close can win the race with a generation/termination event.
       // Absence is already the requested terminal state; transport failures
@@ -2183,16 +2261,16 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     };
   }
 
-  private async flushPendingLaunches(): Promise<void> {
+  private async flushPendingLaunches(budget?: OpenTimeoutBudget): Promise<void> {
     for (const call of [...this.calls.values()]) {
       if (this.disposed || !call.launchPending) continue;
       const target = this.records.get(call.targetInstanceId);
       if (!target || target.failed || target.closing) continue;
       const frameIndex = this.stack.findIndex((frame) => frame.requestId === call.requestId);
       if (frameIndex !== this.stack.length - 1) continue;
-      await this.flushLifecycle(target);
+      await this.flushLifecycle(target, budget);
       if (target.presetsPending || target.lifecycleQueue.length > 0) continue;
-      if (await this.post(target, "platform.launch", this.launchParams(call))) {
+      if (await this.post(target, "platform.launch", this.launchParams(call), budget)) {
         call.launchPending = false;
       }
     }
@@ -2207,7 +2285,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async flushForegroundMailbox(appId: string): Promise<void> {
+  private async flushForegroundMailbox(appId: string, budget?: OpenTimeoutBudget): Promise<void> {
     const frame = this.foregroundFrame();
     if (frame.appId !== appId) return;
     const instanceId = this.instanceForApp.get(appId);
@@ -2219,7 +2297,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         index += 1;
         continue;
       }
-      const accepted = await this.post(runtime, "platform.message", message as unknown as JsonObject);
+      const accepted = await this.post(runtime, "platform.message", message as unknown as JsonObject, budget);
       if (!accepted) break;
       this.mailbox.splice(index, 1);
     }
@@ -2229,6 +2307,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     record: RuntimeRecord,
     state: LifecycleState,
     extra: JsonObject = {},
+    budget?: OpenTimeoutBudget,
   ): Promise<void> {
     const params: JsonObject = {
       appId: record.appId,
@@ -2243,31 +2322,37 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
       if (record.lifecycleQueue.length < 32) record.lifecycleQueue.push(params);
       return;
     }
-    const accepted = await this.post(record, "platform.lifecycle", params);
+    const accepted = await this.post(record, "platform.lifecycle", params, budget);
     if (!accepted && record.lifecycleQueue.length < 32) {
       record.lifecycleQueue.push(params);
     }
   }
 
-  private async flushLifecycle(record: RuntimeRecord): Promise<void> {
+  private async flushLifecycle(record: RuntimeRecord, budget?: OpenTimeoutBudget): Promise<void> {
     if (this.disposed) return;
     if (record.presetsPending && record.instanceId !== SYSTEM_UI_INSTANCE_ID) {
-      if (!(await this.emitPresets(record))) return;
+      if (!(await this.emitPresets(record, budget))) return;
     }
     while (!this.disposed && record.lifecycleQueue.length > 0) {
       const params = record.lifecycleQueue[0]!;
-      const accepted = await this.post(record, "platform.lifecycle", params);
+      const accepted = await this.post(record, "platform.lifecycle", params, budget);
       if (!accepted) return;
       record.lifecycleQueue.shift();
     }
   }
 
-  private async post(record: RuntimeRecord, event: string, params: JsonObject): Promise<boolean> {
+  private async post(
+    record: RuntimeRecord,
+    event: string,
+    params: JsonObject,
+    budget?: OpenTimeoutBudget,
+  ): Promise<boolean> {
     const response = await this.hostObject("system.runtime.post", {
       instanceId: record.instanceId,
       event,
       params,
-    });
+    }, undefined, budget);
+    budget?.assertActive();
     return response.accepted === true;
   }
 
@@ -2298,7 +2383,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     }
   }
 
-  private async handleGenerationChange(payload: unknown): Promise<void> {
+  private async handleGenerationChange(payload: unknown, budget?: OpenTimeoutBudget): Promise<void> {
     if (
       !isRecord(payload) ||
       !nonEmptyString(payload.instanceId) ||
@@ -2350,17 +2435,17 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
     try {
       if (isForeground) await this.presentTop();
       if (record.instanceId !== SYSTEM_UI_INSTANCE_ID) {
-        await this.emitPresets(record);
+        await this.emitPresets(record, budget);
       }
-      await this.lifecycle(record, "onInit", { generationChanged: true });
-      await this.lifecycle(record, "onLoad", { generationChanged: true });
+      await this.lifecycle(record, "onInit", { generationChanged: true }, budget);
+      await this.lifecycle(record, "onLoad", { generationChanged: true }, budget);
       if (isForeground) {
-        await this.lifecycle(record, "onWillAppear", { generationChanged: true });
-        await this.lifecycle(record, "onDidAppear", { generationChanged: true });
+        await this.lifecycle(record, "onWillAppear", { generationChanged: true }, budget);
+        await this.lifecycle(record, "onDidAppear", { generationChanged: true }, budget);
       } else {
-        await this.lifecycle(record, "frozenInStack", { generationChanged: true });
+        await this.lifecycle(record, "frozenInStack", { generationChanged: true }, budget);
       }
-      await this.flushLifecycle(record);
+      await this.flushLifecycle(record, budget);
 
       const frame = frameIndex >= 0 ? this.stack[frameIndex] : undefined;
       const launchCall = frame?.requestId ? this.calls.get(frame.requestId) : undefined;
@@ -2368,7 +2453,7 @@ class PocketSystemKernelImpl implements PocketSystemKernel {
         // The new guest has no retained listeners or launch props from the old
         // generation. Rehydrate its open context from the bounded JS call record.
         launchCall.launchPending = true;
-        await this.flushPendingLaunches();
+        await this.flushPendingLaunches(budget);
       }
     } catch (error) {
       // Both an inline entry gate and a queued host event must fail closed.
