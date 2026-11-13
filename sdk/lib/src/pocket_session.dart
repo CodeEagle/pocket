@@ -959,15 +959,15 @@ final class PocketSession extends ChangeNotifier {
     _busy = true;
     _packageAdmissionInFlight = true;
     try {
-      // Join a preparation already started for this package, or start one if
-      // the last check finished before the latest release was published. A
-      // healthy cached package remains available on network failure; the
-      // background lane records that error and never advances its pointer.
+      // A remote-only MiniApp has no local runtime to present, so wait for its
+      // in-flight cache-first preparation before deciding whether it can open.
+      // Bundled runtimes keep their presentable-cache behavior while their
+      // background lane checks for updates.
       if (_backgroundPreparation == null) {
         _scheduleCacheFirstPreparation();
       }
       final backgroundPreparation = _backgroundPreparation;
-      if (backgroundPreparation != null) {
+      if (_downloadOnOpen && backgroundPreparation != null) {
         await backgroundPreparation;
         if (_disposed) {
           throw const PocketCapabilityException(
