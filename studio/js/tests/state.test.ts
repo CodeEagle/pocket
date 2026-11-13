@@ -11,7 +11,7 @@ import { createPreview, type PreviewRuntime } from "../src/state/preview.ts";
 import { createSettings, DEFAULT_SETTINGS, parseSettings, SETTINGS_KEY } from "../src/state/settings.ts";
 import { validateNewPath } from "../src/lib/path.ts";
 import { excerpt, normalizeDiagnostics } from "../src/lib/diagnostics.ts";
-import { buildTree } from "../src/tree.ts";
+import { buildTree } from "@pocket/ui/tree-model";
 import { createFakeClient, flush } from "./fake_client.ts";
 import { StudioError } from "../src/studio-client.ts";
 
@@ -636,7 +636,7 @@ describe("settings", () => {
     expect(parseSettings({ autoBuild: true, debounceMs: 300, dockPreview: true }).editor).toBe("code"); // M2/M3 stored value without `editor`
     expect(parseSettings({ editor: "input" }).editor).toBe("input");
     expect(parseSettings({ editor: "bogus" }).editor).toBe("code");
-    expect(parseSettings({ autoBuild: true, debounceMs: 99999, dockPreview: false, editor: "code" })).toEqual({ autoBuild: true, debounceMs: 10000, dockPreview: false, editor: "code" });
+    expect(parseSettings({ autoBuild: true, debounceMs: 99999, dockPreview: false, editor: "code" })).toEqual({ autoBuild: true, debounceMs: 10000, dockPreview: false, editor: "code", treeWidth: 240, dockWidth: 300 });
     const timers = createManualTimers();
     const toasts = createToasts(timers);
     const store = new Map<string, unknown>([[SETTINGS_KEY, { autoBuild: true, debounceMs: 300 }]]);

@@ -1,0 +1,43 @@
+{
+  "open": {
+    "projectFiles": [
+      "app.tsx",
+      "manifest.json"
+    ],
+    "fileOnDiskUnchanged": true
+  },
+  "edit": {
+    "diskStillOriginalBeforeSave": true
+  },
+  "save": {
+    "insertedAtHead": "/*ab*/",
+    "tailUnchanged": true
+  },
+  "build": {
+    "builtCurrentRevision": true,
+    "error": null
+  },
+  "publish": {
+    "releases": 1,
+    "slot": "test",
+    "channel": "test",
+    "packageIds": [
+      "pocket.rec"
+    ],
+    "hasPayloadDigest": true
+  },
+  "recording": {
+    "complete": true,
+    "studioGuestFinished": true,
+    "hasTransactions": true
+  },
+  "privacy": {
+    "noPrivateKeyInTape": true,
+    "noAbsolutePathInTape": true
+  },
+  "replay": {
+    "matched": true,
+    "archiveMatched": true,
+    "firstMismatch": null
+  }
+}

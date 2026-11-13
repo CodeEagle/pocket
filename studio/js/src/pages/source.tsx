@@ -1,14 +1,17 @@
-import { Show } from "solid-js";
+import { Show, createSignal } from "solid-js";
 import { MobileButton, ScrollablePage } from "@pocket/ui";
+import { SplitPane } from "@pocket/ui/split-pane";
+import { TabsBar } from "@pocket/ui/tabs";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import { fromStore } from "../ui/bind.ts";
 import { FileTree } from "../components/file-tree.tsx";
-import { Tabs } from "../components/tabs.tsx";
 import { PreviewSurface, PREVIEW_PHASE_LABEL } from "../components/preview-surface.tsx";
 import { resolveEditor, type EditorPaneProps } from "../components/editor-pane.tsx";
 import { C } from "../ui/theme.ts";
 import type { Studio } from "../state/studio.ts";
 import { isDirty, MAX_INPUT_BYTES } from "../state/workspace.ts";
+import { DOCK_WIDTH_LIMITS, TREE_WIDTH_LIMITS } from "../state/settings.ts";
+import { basename } from "../lib/path.ts";
 
 /** Editor pane for the active document: banners, then the swappable editor widget. */
 function ActiveEditor(props: { studio: Studio }) {
@@ -22,6 +25,7 @@ function ActiveEditor(props: { studio: Studio }) {
   // A document opened under the code editor can exceed what the InputField can shape; say so instead of freezing it.
   const tooBigForInput = () => settings().editor === "input" && (doc()?.bytes ?? 0) > MAX_INPUT_BYTES;
   const own = () => build().diagnostics.filter((d) => d.file === doc()?.path);
+  const commands = fromStore(s.commands.requests);
   return (
     <Show when={doc()} fallback={<Text class="text-sm" style={{ textColor: C.muted }}>从左侧选择文件开始编辑。</Text>}>
       {(d) => (
@@ -48,6 +52,7 @@ function ActiveEditor(props: { studio: Studio }) {
                   <Editor
                     path={d().path} text={d().text} onChange={(t) => s.workspace.setText(d().path, t)} onSave={() => void s.workspace.save(d().path)}
                     diagnostics={own()} jump={d().jump} buffer={(path) => s.workspace.editorFor(path)} reload={d().reload} clipboard={s.clipboard}
+                    findRequest={commands().find} onKeyDown={(key) => s.commands.handleKey(key, { editorFocused: true })}
                   />
                 </View>
               </Show>
@@ -67,6 +72,19 @@ export function SourcePage(props: { studio: Studio }) {
   const preview = fromStore(s.preview.store);
   const project = () => ws().project;
   const dirtyCount = () => ws().docs.filter(isDirty).length;
+  // Live sizes while a split handle is dragged; the persisted setting is written once on release.
+  const [live, setLive] = createSignal<{ tree?: number; dock?: number }>({});
+  const tree = () => live().tree ?? settings().treeWidth;
+  const dock = () => live().dock ?? settings().dockWidth;
+  const EditorColumn = () => (
+    <>
+      <TabsBar
+        tabs={ws().docs.map((d) => ({ id: d.path, label: basename(d.path), dirty: isDirty(d) }))} active={ws().active}
+        onActivate={(path) => s.workspace.activate(path)} onClose={(path) => void s.workspace.close(path)}
+      />
+      <ActiveEditor studio={s} />
+    </>
+  );
   return (
     <View class="flex-col gap-2 p-4 flex-1">
       <View class="flex-row items-center gap-2">
@@ -79,19 +97,28 @@ export function SourcePage(props: { studio: Studio }) {
           <Text class="text-xs" style={{ textColor: C.muted }}>{`预览：${PREVIEW_PHASE_LABEL[preview().phase]}`}</Text>
         </Show>
       </View>
-      <View class="flex-row gap-3 flex-1">
-        <View class="flex-col" style={{ width: 240 }}><FileTree studio={s} /></View>
-        <View class="flex-col gap-2 flex-1">
-          <Tabs studio={s} />
-          <ActiveEditor studio={s} />
-        </View>
-        <Show when={settings().dockPreview && project()}>
-          <View class="flex-col gap-1" style={{ width: 300 }}>
-            <Text class="text-xs font-bold" style={{ textColor: C.muted }}>实时预览</Text>
-            <PreviewSurface studio={s} />
-          </View>
-        </Show>
-      </View>
+      <SplitPane
+        size={tree()} min={TREE_WIDTH_LIMITS.min} max={TREE_WIDTH_LIMITS.max}
+        onResize={(w) => setLive({ ...live(), tree: w })}
+        onResizeEnd={(w) => { void s.settings.set({ treeWidth: w }); setLive({ ...live(), tree: undefined }); }}
+        first={<FileTree studio={s} />}
+        second={(
+          <Show when={settings().dockPreview && project()} fallback={<View class="flex-col gap-2 flex-1 pl-2"><EditorColumn /></View>}>
+            <SplitPane
+              fixed="second" size={dock()} min={DOCK_WIDTH_LIMITS.min} max={DOCK_WIDTH_LIMITS.max}
+              onResize={(w) => setLive({ ...live(), dock: w })}
+              onResizeEnd={(w) => { void s.settings.set({ dockWidth: w }); setLive({ ...live(), dock: undefined }); }}
+              first={<View class="flex-col gap-2 flex-1 px-2"><EditorColumn /></View>}
+              second={(
+                <View class="flex-col gap-1 pl-2">
+                  <Text class="text-xs font-bold" style={{ textColor: C.muted }}>实时预览</Text>
+                  <PreviewSurface studio={s} />
+                </View>
+              )}
+            />
+          </Show>
+        )}
+      />
     </View>
   );
 }

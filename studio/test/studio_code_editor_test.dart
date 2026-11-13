@@ -226,6 +226,31 @@ void main() {
     expect(inserted.contains('ab') || inserted.contains('a'), isTrue);
     expect(saved.split('\n').length, original.split('\n').length);
 
+    // M7 profile: 100 more single-character IME commits at the document start (host-observed wall time per key includes the
+    // 150 ms pump of the helper; the guest-side per-frame numbers are in studio/js/tests/studio_profile.test.ts).
+    final rssBeforeKeys = ProcessInfo.currentRss;
+    final keyClock = Stopwatch()..start();
+    for (var i = 0; i < 100; i++) {
+      await ime('', String.fromCharCode(97 + i % 26), 0, 0, 1);
+    }
+    keyClock.stop();
+    final cache2 = studioSession().controller.textLayoutCacheStats;
+    final rssAfterKeys = ProcessInfo.currentRss;
+    // ignore: avoid_print
+    print('STUDIO_PROFILE_DART ${jsonEncode({
+      'keys': 100,
+      'wallMsPerKeyIncludingPump': (keyClock.elapsedMilliseconds / 100).round(),
+      'rssMBBefore': (rssBeforeKeys / 1048576).round(),
+      'rssMBAfter': (rssAfterKeys / 1048576).round(),
+      'layoutCache': cache2 == null ? null : {'capacity': cache2.capacity, 'length': cache2.length, 'hits': cache2.hitCount, 'layouts': cache2.layoutCount, 'evictions': cache2.evictionCount},
+    })}');
+    // Generous regression bounds: the cache never exceeds its capacity, typing does not thrash it, and the process
+    // (Flutter test harness + native runtime + debug build) stays far below a runaway heap.
+    expect(cache2!.length, lessThanOrEqualTo(cache2.capacity));
+    expect(cache2.evictionCount, lessThan(cache2.capacity * 20), reason: 'layout cache thrashing');
+    expect(rssAfterKeys - rssBeforeKeys, lessThan(300 * 1048576), reason: '100 keys must not grow the process by hundreds of MB');
+    expect(rssAfterKeys, lessThan(4 * 1024 * 1048576));
+
     // ignore: avoid_print
     print('STUDIO_CODE_E2E ${jsonEncode({
       'lines': original.split('\n').length,

@@ -27,6 +27,10 @@ export interface EditorPaneProps {
   reload?: number;
   /** Code pane only: system clipboard client (`clipboard.*` capabilities); without it an internal clipboard is used. */
   clipboard?: { readText(): Promise<string | null>; writeText(text: string): Promise<void> };
+  /** Code pane only: incremented by the shell's find command (Cmd+F outside the editor): focus and open the find bar. */
+  findRequest?: number;
+  /** Code pane only: first look at every key-down (shell shortcuts); return true to consume it. */
+  onKeyDown?: (key: string) => boolean | void;
 }
 export type EditorPane = (props: EditorPaneProps) => JSX.Element;
 
@@ -88,6 +92,7 @@ function CodeSurface(props: EditorPaneProps & { path: string }): JSX.Element {
   createEffect(on(() => props.jump?.seq, () => { if (handle) jumpNow(); }, { defer: true }));
   // The buffer was replaced from outside (undoable edit): repaint from the buffer.
   createEffect(on(() => props.reload, () => handle?.refresh(), { defer: true }));
+  createEffect(on(() => props.findRequest, () => { if (handle) { handle.focus(); handle.openFind(); } }, { defer: true }));
   return (
     <View class="flex-col flex-1 w-full gap-1">
       <View class="flex-1 w-full">
@@ -95,6 +100,7 @@ function CodeSurface(props: EditorPaneProps & { path: string }): JSX.Element {
           editor={editor} path={props.path} theme={CODE_THEME} fontSlot={inlineFontSlot("body")}
           diagnostics={marks()} clipboard={props.clipboard}
           onIntent={(intent) => { if (intent.type === "save") props.onSave(); }}
+          onKeyDown={(key) => props.onKeyDown?.(key)}
           onCursorChange={(c) => { lastLine.set(props.path, c.line); setCursor({ line: c.line, column: c.column }); }}
           ref={(h) => { handle = h; }}
         />

@@ -14,12 +14,16 @@ import { createPublish } from "./publish.ts";
 import { createArtifacts } from "./artifacts.ts";
 import { createVersions } from "./versions.ts";
 import { createCopier } from "./copy.ts";
+import { createQuickOpen } from "./quick-open.ts";
+import { createCommands } from "./commands.ts";
 import { createSelfUpdate, type UpdateBackend } from "./self-update.ts";
 import type { UpdateHandoff } from "./update-link.ts";
 import type { Timers } from "./env.ts";
 import type { StudioClient } from "../studio-client.ts";
 
 export type StudioPage = "projects" | "source" | "console" | "preview" | "resources" | "settings" | "artifacts" | "publish" | "versions";
+/** Rail order; Cmd+1..9 select by position. */
+export const STUDIO_PAGES: readonly StudioPage[] = ["projects", "source", "console", "preview", "resources", "settings", "artifacts", "publish", "versions"];
 
 export interface StudioDeps {
   client: StudioClient;
@@ -64,6 +68,7 @@ export function createStudio(deps: StudioDeps) {
     client, toasts,
     confirmLeave: () => workspace.confirmLeave(),
     onOpen: async (id) => {
+      quickOpen.hide();
       await preview.reset();
       deploy.reset();
       publish.reset();
@@ -73,6 +78,18 @@ export function createStudio(deps: StudioDeps) {
       await workspace.load(id);
     },
     onOpened: () => nav.update({ page: "source" }),
+  });
+
+  // M7: keyboard shell. One keymap (keymap.ts) -> one command table; quick-open is the fuzzy file finder.
+  const quickOpen = createQuickOpen({
+    paths: () => workspace.state().files.map((f) => f.path),
+    recent: () => { const { docs, active } = workspace.state(); return [...(active ? [active] : []), ...docs.map((d) => d.path).filter((p) => p !== active)]; },
+    openFile: (path) => workspace.open(path),
+    onChosen: () => nav.update({ page: "source" }),
+  });
+  const commands = createCommands({
+    pages: STUDIO_PAGES, page: () => nav.get().page, setPage: (page) => nav.update({ page }), project: () => projects.current(),
+    workspace, build, preview, publish, dialogs, quickOpen, toasts,
   });
 
   // Auto-build: a save (after a quiet period) triggers build -> publish -> reload.
@@ -86,7 +103,7 @@ export function createStudio(deps: StudioDeps) {
 
   // M6: self-update. Only portable UI state crosses an update (the page and the open project); the new guest
   // validates it synchronously and the project is reopened once the project list is back.
-  const pages: readonly StudioPage[] = ["projects", "source", "console", "preview", "resources", "settings", "artifacts", "publish", "versions"];
+  const pages = STUDIO_PAGES;
   let restored: { page: StudioPage; project?: string } | undefined;
   const handoff: UpdateHandoff = {
     capture: () => ({ page: nav.get().page, project: projects.current() ?? null }),
@@ -114,7 +131,7 @@ export function createStudio(deps: StudioDeps) {
   return {
     nav, page: () => nav.get().page, setPage: (page: StudioPage) => nav.update({ page }),
     toasts, dialogs, workspace, build, settings, preview, deploy, projects,
-    publish, artifacts, versions, copy, selfUpdate,
+    publish, artifacts, versions, copy, selfUpdate, quickOpen, commands,
     client, timers, clipboard: deps.clipboard,
   };
 }

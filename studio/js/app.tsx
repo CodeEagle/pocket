@@ -13,27 +13,28 @@ import { createStudio, type Studio } from "./src/state/studio.ts";
 import { createSystemLink } from "./src/state/system-link.ts";
 import { createUpdateLink } from "./src/state/update-link.ts";
 import { guestTimers, yieldTurn } from "./src/ui/guest-env.ts";
-import { select } from "./src/ui/bind.ts";
+import { fromStore, select } from "./src/ui/bind.ts";
 import { Rail } from "./src/components/rail.tsx";
-import { ToastHost } from "./src/components/toasts.tsx";
+import { ToastHost } from "@pocket/ui/toast-host";
+import { QuickOpenOverlay } from "./src/components/quick-open.tsx";
 import { DialogHost } from "./src/components/dialog-host.tsx";
 import { CreateProjectDialog } from "./src/pages/projects.tsx";
 import { pages } from "./src/pages/index.tsx";
 
 function Shell(props: { studio: Studio; host: HostBridge }) {
   const page = select(props.studio.nav, (n) => n.page);
+  const toastState = fromStore(props.studio.toasts.store);
   // The Flutter text overlay answers InputField sessions with textInput.* events; route them to the field.
   const stopText = props.host.onEvent?.((event) => { deliverTextInputEvent(event.method, event.params as Record<string, unknown>); });
   onCleanup(() => stopText?.());
-  // Cmd/Ctrl+S saves. The CodeView reports its own "save" intent from the raw key session;
-  // this shell hook covers keys that arrive as plain key events (a focused InputField is a
-  // Flutter text field that keeps its own key handling, so the toolbar "保存" button also works).
-  onTextEvent((event) => {
-    if (event.kind === "key" && event.pressed && (event.key === "Control+s" || event.key === "Meta+s")) {
-      void props.studio.workspace.save();
-      return true;
-    }
+  // Shell shortcuts (src/keymap.ts). A focused CodeView offers every key to the shell first through its onKeyDown hook
+  // (global bindings win, editor-scoped ones stay with the editor); this hook covers keys that arrive as plain key events
+  // when no editor has the keyboard. A focused InputField is a Flutter text field and keeps its own key handling.
+  const toasts = props.studio.toasts;
+  const stopKeys = onTextEvent((event) => {
+    if (event.kind === "key" && event.pressed && !event.repeat) return props.studio.commands.handleKey(event.key, { editorFocused: false });
   });
+  onCleanup(stopKeys);
   return (
     <Screen class="w-full h-full flex-row bg-[#09090B]">
       <Rail studio={props.studio} />
@@ -42,7 +43,8 @@ function Shell(props: { studio: Studio; host: HostBridge }) {
       </View>
       <CreateProjectDialog studio={props.studio} />
       <DialogHost dialogs={props.studio.dialogs} />
-      <ToastHost toasts={props.studio.toasts} />
+      <QuickOpenOverlay quickOpen={props.studio.quickOpen} />
+      <ToastHost items={toastState().items} onDismiss={(id) => toasts.dismiss(id)} />
     </Screen>
   );
 }

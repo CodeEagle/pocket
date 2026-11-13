@@ -56,7 +56,7 @@ export class ProbeSession {
   /** Every guest -> host event other than host.request, newest last (bounded). */
   readonly guestEvents: Array<{ name: string; payload: Record<string, any> }> = [];
 
-  constructor(private readonly responder: Responder, private readonly size = { width: 900, height: 640 }) {
+  constructor(private readonly responder: Responder, private readonly size = { width: 900, height: 640 }, private readonly memory?: { heapLimitBytes?: number; maxPakBytes?: number }) {
     this.child = spawn(probePath(), [], { stdio: ["pipe", "pipe", "pipe"] });
     const decoder = new StringDecoder("utf8");
     this.child.stdout.on("data", (chunk: Buffer) => this.accept(decoder.write(chunk)));
@@ -64,6 +64,9 @@ export class ProbeSession {
     this.child.on("exit", (code) => { if (code !== 0) this.fail(new Error(`pocket_probe exited ${code}: ${this.stderr}`)); });
     live.add(this);
   }
+
+  /** OS process id of the native probe (RSS sampling in the profile test). */
+  get pid(): number { return this.child.pid!; }
 
   kill(): void { live.delete(this); if (!this.child.killed) this.child.kill(); }
 
@@ -141,7 +144,7 @@ export class ProbeSession {
   }
 
   async boot(): Promise<Frame> {
-    this.send({ op: "create", ...this.size, compositorSurfaces: { "dev.pocket.studio.preview": 4 } });
+    this.send({ op: "create", ...this.size, ...(this.memory ? { memory: this.memory } : {}), compositorSurfaces: { "dev.pocket.studio.preview": 4 } });
     assert.equal((await this.line()).ok, true, "create failed");
     const { bytecodePath, pakPath } = artifacts();
     this.send({ op: "loadBytecode", bytecodePath, pakPath });

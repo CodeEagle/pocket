@@ -1,4 +1,4 @@
-# Pocket Studio architecture (M1 shell and transport, M2 editing, M3 build and live preview, M5 publish, M6 self-hosting)
+# Pocket Studio architecture (M1 shell and transport, M2 editing, M3 build and live preview, M5 publish, M6 self-hosting, M7 hardening)
 
 Pocket Studio is a Pocket guest app (TSX on `@pocket/ui`, compiled to QuickJS bytecode by the one pinned
 `buildGuest` pipeline) running in a thin Flutter macOS host. The Bun editor service in `sdk/editor` stays the
@@ -390,6 +390,72 @@ Test: `studio/test/studio_self_update_test.dart` (real library, real service, re
 only accepts the project's own configuration keys, so it is not used for Studio preferences. The manifest declares
 `system.storage.get/set/remove/keys` and `system.runtime.awaitFirstFrame` as optional capabilities.
 
+## Keyboard and quick-open (M7)
+
+One table, `studio/js/src/keymap.ts`, maps raw-input key names (`sdk/docs/STUDIO_TEXT_INPUT.md`: modifiers folded in the order
+Control, Alt, Shift, Meta, e.g. `Meta+s`, `Shift+Meta+B`, `Control+Shift+p`) to command ids; `state/commands.ts` executes a
+command against the stores (the only place where "build" or "close tab" is defined); Settings renders the same table
+(`helpRows`). `Mod` is Meta on macOS and Control elsewhere; the default platform `any` accepts exactly one of them, so
+`Control+Meta+b` is nothing.
+
+Routing uses the existing raw key path, no second one: while a CodeView owns the keyboard its raw text session consumes every
+text event (framework handlers run newest first), so the CodeView offers each key-down to the shell through its
+`onKeyDown(key, owned)` hook (`@pocket/ui/code-view`) before handling it; when no editor has the keyboard the shell's own
+`onTextEvent` handler in `app.tsx` receives the plain key events. Both call `commands.handleKey`.
+
+Precedence (documented and tested in `keymap.test.ts`, `studio_guest_keys.test.ts`):
+
+1. **Editor-scoped bindings** (Cmd+S, Cmd+F) belong to the CodeView while it has the keyboard: its save intent runs the same
+   `workspace.save` (exactly one write), its find bar opens. The shell runs them only when no editor has the keyboard (Cmd+F then
+   switches to Source and sends a find request that the pane turns into `focus()` + `openFind()`).
+2. **Global bindings** (build, quick-open, close tab, tab switch, pages, publish) win even if CodeView's keymap also maps the
+   key; they are consumed before the editor sees them. The only overlap is Shift+[ / ] when a host names them `[` / `]`
+   instead of `{` / `}` (the editor's outdent / indent-lines); the tab switch wins.
+3. **Conditional globals** (Esc, ArrowUp/Down, Enter) are consumed only while a dialog or quick-open is open; otherwise the
+   command reports "not handled" and the key reaches the editor untouched (Esc still closes find).
+4. Unbound keys always reach the editor. A focused `InputField` is a Flutter text field: its keys never reach the guest.
+
+| Key | Command | Notes |
+| --- | --- | --- |
+| Cmd+S | save | editor-scoped |
+| Cmd+F | find | editor-scoped |
+| Cmd+B / Cmd+Shift+B | build / build + publish preview + reload child | `build.start` / `preview.run({build:true})` |
+| Cmd+P | quick-open toggle | needs a project |
+| Cmd+W | close tab | dirty tab asks first (existing dialog) |
+| Cmd+Shift+[ / ] | previous / next tab (wraps) | `stepTab` from `@pocket/ui/tabs` |
+| Cmd+1..9 | rail page by position | `STUDIO_PAGES` order |
+| Cmd+Shift+P | publish | opens the Publish page and loads the plan; signing stays behind that page's button (and the stable-channel confirmation) |
+| Esc | close dialog, else quick-open | conditional |
+
+Quick-open (`state/quick-open.ts`, `lib/fuzzy.ts`, `components/quick-open.tsx`): subsequence match over the project's editable
+files with word-start, consecutive and file-name bonuses; an empty query lists open tabs first. The overlay's field uses the new
+`InputField autoFocus` so typing works right after Cmd+P; arrows/Enter/Esc come from the keymap when the field's session does
+not take them, rows are tappable, Enter in the field accepts too.
+
+## Shared components and the Source layout (M7)
+
+`Tree`, `SplitPane`, `TabsBar` and `ToastHost` live in `sdk/packages/pocket_ui` (record: `sdk/docs/SHARED_EDITOR_COMPONENTS.md`);
+the Studio keeps `file-tree.tsx` (toolbar around `Tree`) and `state/toasts.ts`. The Source page is
+`SplitPane(tree | SplitPane(editor | preview dock))`: widths 240 / 300 by default, limits 160-480 and 200-640, live while dragging,
+persisted once on release in `studio.settings.v1` (`treeWidth`, `dockWidth`; invalid values clamp to the limits).
+
+## Record-and-replay regression and profiling (M7)
+
+* `studio/test/studio_recording_test.dart` uses the SDK recording facility (`PocketRecordingLibrary`, `docs/RECORDING_REPLAY.md`)
+  on the real Studio guest, host plugins and a real service on a temp project. Recorded: open, file open, IME edit, Cmd+S, Cmd+B,
+  Cmd+Shift+P, publish tap. Replay: fresh native guests, no providers, `host.response`s, clock values and inputs from the tape, every
+  frame digest must match; then the exported archive is replayed from disk. **Determinism:** a tape pins the bytecode hash, so
+  it is re-recorded on every run rather than stored; the stored fixture is the normalised semantic checkpoint list
+  (`test/fixtures/journey_checkpoints.json`), free of timestamps, build ids, hashes, ports and paths.
+* SDK fix found by this test: `PocketView` synced host font metrics after compositor/offload/worker configuration. A recording
+  locks its font snapshot with the first recorded transaction, so the sync was deferred and a native-text bytecode (the Studio)
+  could not load. The sync now runs right after the runtime is created.
+* `studio/js/tests/studio_profile.test.ts` and the extended `studio_code_editor_test.dart`: see `PERFORMANCE.md`. The SDK exposes no
+  QuickJS used-bytes counter, so the heap high-water is bisected with the real allocator ceiling (`memory.heapLimitBytes`).
+* Leak review (`keymap.test.ts` "resources are released"): tab churn and project switches keep one watch stream and one build stream,
+  editor buffers are dropped with their document, toasts (4) and the build log ring (2,000) are bounded. The probe churn test shows
+  no linear RSS growth (24 versus 6 cycles: +2 MB versus +3 MB).
+
 ## Building and running on macOS
 
 ```sh
@@ -433,6 +499,7 @@ configuration on the real native library.
 * `studio/test/studio_self_update_test.dart`: M6 exit test (Linux): the Studio opens its own project (temp copy of `studio/js`, trusted extra root), builds and publishes it by taps; Settings checks and applies; the running Studio shows the new marker; a deliberately broken build (throws at startup) is applied and the host rolls back to the last good package; the package store's `active`/`lastGood` pointers are asserted.
 * `studio/js/tests/state_m6.test.ts`, `studio_guest_update.test.ts`: self-update store and the Settings flow on the real probe with a fake host.
 * `studio/test/studio_publish_test.dart`: M5 exit test (Linux part): real service + real signing; the Studio guest publishes a signed test update by taps; a client (`PocketHostConfig.load` -> `PocketSession` -> `FfiPocketRuntime`) downloads, verifies, activates and runs it; a second publish is picked up by the same client session; no key material or absolute path reached the guest.
+* M7: `studio/test/studio_recording_test.dart` (record/replay regression), `studio/js/tests/keymap.test.ts` (keymap, fuzzy, commands, leak checks), `studio_guest_keys.test.ts` (keys on the probe), `studio_profile.test.ts` (profiling bounds), `sdk/packages/pocket_ui/test/shared_components_{model,native}.test.ts`.
 
 Known gaps found while testing: (1) in the probe harness a second large (>~170 KB) inbound `host.response` right after
 another is not delivered to the guest, so chunked reads are verified by bun unit tests and the verified client, not by

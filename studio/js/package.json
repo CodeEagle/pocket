@@ -9,7 +9,7 @@
   "scripts": {
     "build": "bun ../../sdk/scripts/build_guest.ts --project-root=\"$PWD\" --copy-assets-to=\"$PWD/../assets\" --keep-source=\"$PWD/.pocket-build/app.js\"",
     "test": "bash scripts/test_guest.sh",
-    "test:unit": "bun test tests/studio_client.test.ts tests/tree.test.ts tests/state.test.ts tests/state_m5.test.ts tests/state_m6.test.ts",
-    "test:guest": "bun test tests/studio_guest_native.test.ts tests/studio_guest_workflows.test.ts tests/studio_guest_preview.test.ts tests/studio_guest_publish.test.ts tests/studio_guest_code.test.ts tests/studio_guest_update.test.ts"
+    "test:unit": "bun test tests/studio_client.test.ts tests/tree.test.ts tests/state.test.ts tests/state_m5.test.ts tests/state_m6.test.ts tests/keymap.test.ts",
+    "test:guest": "bun test tests/studio_guest_native.test.ts tests/studio_guest_workflows.test.ts tests/studio_guest_preview.test.ts tests/studio_guest_publish.test.ts tests/studio_guest_code.test.ts tests/studio_guest_update.test.ts tests/studio_guest_keys.test.ts tests/studio_profile.test.ts"
   }
 }

@@ -1,10 +1,11 @@
-import { Show, onMount } from "solid-js";
+import { For, Show, onMount } from "solid-js";
 import { MobileButton, MobileSegmentedControl, MobileSwitch, ScrollablePage } from "@pocket/ui";
 import { Text, View } from "@pocketjs/framework/solid/components";
 import { fromStore } from "../ui/bind.ts";
 import { DEBOUNCE_CHOICES } from "../state/settings.ts";
 import { C } from "../ui/theme.ts";
 import { Line, Panel } from "../components/info.tsx";
+import { helpRows } from "../keymap.ts";
 import type { Studio } from "../state/studio.ts";
 
 export function SettingsPage(props: { studio: Studio }) {
@@ -49,6 +50,9 @@ export function SettingsPage(props: { studio: Studio }) {
           <MobileButton label="检查 Studio 更新" kind="tonal" compact disabled={update().phase === "checking" || update().phase === "applying" || update().phase === "unavailable"} onPress={() => void s.selfUpdate.check()} />
           <Show when={update().phase === "available"}><MobileButton label="应用更新" compact onPress={() => void s.selfUpdate.apply()} /></Show>
         </View>
+      </Panel>
+      <Panel title="键盘快捷键" note="Cmd 为主修饰键（非 macOS 为 Ctrl）。标有“编辑器”的快捷键在代码视图获得键盘时由编辑器处理，其余快捷键始终由 Studio 外壳优先处理。输入框获得焦点时按键属于输入框。">
+        <For each={helpRows("mac")}>{(row) => <Line label={row.chord} value={`${row.label}${row.scope === "editor" ? "（编辑器内由编辑器处理）" : ""}`} />}</For>
       </Panel>
       </View>
       </ScrollablePage>

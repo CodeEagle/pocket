@@ -45,3 +45,21 @@ export async function boot(setup?: (fake: FakeStudio) => void, editor: "input" |
   await session.boot();
   return { fake, session };
 }
+
+/** One `input.text` key-down (modifier mask: shift=1 control=2 alt=4 meta=8) and the frame that handles it. */
+export async function press(session: ProbeSession, name: string, modifiers = 0): Promise<Frame> {
+  session.sendEvent("input.text", [{ kind: "keyDown", key: name, ...(modifiers ? { modifiers } : {}) }] as unknown as Record<string, unknown>);
+  return session.frame();
+}
+
+/** The code view session handshake of the code-pane tests: tap a code row, the host answers rawOpened. */
+export async function focusEditor(session: ProbeSession, rowText: RegExp): Promise<Frame> {
+  const frame = await session.frame();
+  const op = textOps(frame, rowText)[0];
+  assert.ok(op, `no code row ${rowText} in\n${textOf(frame)}`);
+  await session.tap(op.x! + 1, center(op).y);
+  const open = [...session.guestEvents].reverse().find((e) => e.name === "textInput.rawOpen");
+  assert.ok(open, "tapping the code view must open a raw text session");
+  session.sendEvent("textInput.rawOpened", { id: String(open.payload.id) });
+  return session.settle(3);
+}

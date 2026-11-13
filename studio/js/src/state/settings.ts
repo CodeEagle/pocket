@@ -20,11 +20,18 @@ export interface StudioSettings {
   dockPreview: boolean;
   /** Editor widget: "code" is the CodeView (default since M4); "input" is the M2 multi-line InputField fallback. */
   editor: "input" | "code";
+  /** Source page pane sizes in px (resizable with the split handles). */
+  treeWidth: number;
+  dockWidth: number;
 }
 export interface SettingsState extends StudioSettings { loaded: boolean; persistence: "unknown" | "ok" | "unavailable" }
 
 export const SETTINGS_KEY = "studio.settings.v1";
-export const DEFAULT_SETTINGS: StudioSettings = { autoBuild: false, debounceMs: 800, dockPreview: true, editor: "code" };
+export const DEFAULT_SETTINGS: StudioSettings = { autoBuild: false, debounceMs: 800, dockPreview: true, editor: "code", treeWidth: 240, dockWidth: 300 };
+export const TREE_WIDTH_LIMITS = { min: 160, max: 480 } as const;
+export const DOCK_WIDTH_LIMITS = { min: 200, max: 640 } as const;
+const clampWidth = (value: unknown, limits: { min: number; max: number }, fallback: number): number =>
+  typeof value === "number" && Number.isFinite(value) ? Math.min(limits.max, Math.max(limits.min, Math.round(value))) : fallback;
 export const DEBOUNCE_CHOICES: readonly number[] = [300, 800, 2000];
 
 export function parseSettings(value: unknown): StudioSettings {
@@ -36,6 +43,8 @@ export function parseSettings(value: unknown): StudioSettings {
     dockPreview: r.dockPreview === false ? false : DEFAULT_SETTINGS.dockPreview,
     // Stored settings from M2/M3 have no (or "input") editor: absent migrates to the new default, an explicit choice stays.
     editor: r.editor === "input" ? "input" : "code",
+    treeWidth: clampWidth(r.treeWidth, TREE_WIDTH_LIMITS, DEFAULT_SETTINGS.treeWidth),
+    dockWidth: clampWidth(r.dockWidth, DOCK_WIDTH_LIMITS, DEFAULT_SETTINGS.dockWidth),
   };
 }
 
