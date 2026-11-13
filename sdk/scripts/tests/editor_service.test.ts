@@ -525,6 +525,55 @@ test("upgrade retirement excludes the updater ancestry while retaining worker tr
   expect(protectedRetirementPlan([{ pid: 1, ppid: 2 }, { pid: 2, ppid: 1 }], 100, 1)).toBeNull();
 });
 
+test("protected retirement identifies malformed rows and unsafe ancestry without exposing commands", () => {
+  let rejection: unknown;
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0, cmd: "private command" },
+    { pid: 100, ppid: 1, cmd: "server command" },
+    { pid: 200, ppid: Number.NaN, cmd: "private updater command" },
+  ], 100, 200, value => { rejection = value; })).toBeNull();
+  expect(rejection).toEqual({
+    reason: "invalid-process-row",
+    row: 2,
+    fields: [{ field: "ppid", type: "number" }],
+  });
+  expect(JSON.stringify(rejection)).not.toContain("private command");
+
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0 },
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: 1 },
+    { pid: 200, ppid: 1 },
+  ], 100, 200, value => { rejection = value; })).toBeNull();
+  expect(rejection).toEqual({
+    reason: "duplicate-process-pid",
+    pid: 200,
+    rows: [2, 3],
+  });
+
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0 },
+    { pid: 100, ppid: 1 },
+    { pid: 200, ppid: 300 },
+    { pid: 300, ppid: 200 },
+  ], 100, 200, value => { rejection = value; })).toBeNull();
+  expect(rejection).toEqual({
+    reason: "protected-process-tree-cycle",
+    cyclePids: [200, 300, 200],
+  });
+
+  expect(protectedRetirementPlan([
+    { pid: 1, ppid: 0 },
+    { pid: 200, ppid: 1 },
+    { pid: 100, ppid: 200 },
+  ], 100, 200, value => { rejection = value; })).toBeNull();
+  expect(rejection).toEqual({
+    reason: "target-is-inside-protected-process-tree",
+    targetPid: 100,
+    protectedPid: 200,
+  });
+});
+
 
 test("upgrade retirement kills the real server tree but preserves its detached updater", { timeout: 10_000 }, async () => {
   const source = `

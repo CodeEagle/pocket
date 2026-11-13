@@ -253,50 +253,115 @@ async function assertPortOwnership(port, allowForeign) {
 
 // Keep the detached updater alive while retiring its old Studio process and
 // unrelated worker branches.
-function protectedRetirementPlan(processes, targetPid, protectedPid) {
+function protectedRetirementPlan(processes, targetPid, protectedPid, onReject) {
+  const reject = (reason, details = {}) => {
+    onReject?.({ reason, ...details });
+    return null;
+  };
+  if (!Array.isArray(processes)) {
+    return reject("process-snapshot-not-array", {
+      snapshotType: processes === null ? "null" : typeof processes,
+    });
+  }
   const target = Number(targetPid);
   const protectedPidNumber = Number(protectedPid);
   if (
-    !Array.isArray(processes)
-    || !Number.isInteger(target) || target <= 0
+    !Number.isInteger(target) || target <= 0
     || !Number.isInteger(protectedPidNumber) || protectedPidNumber <= 0
-    || target === protectedPidNumber
-  ) return null;
+  ) {
+    return reject("invalid-retirement-pid", {
+      targetPid: Number.isInteger(target) ? target : null,
+      protectedPid: Number.isInteger(protectedPidNumber) ? protectedPidNumber : null,
+    });
+  }
+  if (target === protectedPidNumber) {
+    return reject("target-is-protected-process", { targetPid: target });
+  }
 
   const parents = new Map();
+  const rowByPid = new Map();
   const children = new Map();
-  for (const info of processes) {
+  const describeInvalidValue = value => ({
+    type: value === null ? "null" : typeof value,
+    ...(typeof value === "number" && Number.isFinite(value) ? { value } : {}),
+  });
+  for (let index = 0; index < processes.length; index += 1) {
+    const info = processes[index];
+    if (info === null || typeof info !== "object") {
+      return reject("invalid-process-row", {
+        row: index,
+        rowType: info === null ? "null" : typeof info,
+      });
+    }
     const pid = Number(info?.pid);
     const ppid = Number(info?.ppid);
+    const invalidFields = [];
+    if (info.pid == null || !Number.isInteger(pid) || pid < 0) {
+      invalidFields.push({ field: "pid", ...describeInvalidValue(info.pid) });
+    }
+    if (info.ppid == null || !Number.isInteger(ppid) || ppid < 0) {
+      invalidFields.push({ field: "ppid", ...describeInvalidValue(info.ppid) });
+    }
+    if (invalidFields.length) {
+      return reject("invalid-process-row", { row: index, fields: invalidFields });
+    }
     if (
-      info?.pid == null || info?.ppid == null
-      || !Number.isInteger(pid) || pid < 0
-      || !Number.isInteger(ppid) || ppid < 0
-      || parents.has(pid)
-    ) return null;
+      parents.has(pid)
+    ) {
+      return reject("duplicate-process-pid", {
+        pid,
+        rows: [rowByPid.get(pid), index],
+      });
+    }
     parents.set(pid, ppid);
+    rowByPid.set(pid, index);
     children.set(pid, []);
   }
 
-  if (!parents.has(target) || !parents.has(protectedPidNumber)) return null;
+  if (!parents.has(target)) {
+    return reject("target-missing-from-process-snapshot", { targetPid: target });
+  }
+  if (!parents.has(protectedPidNumber)) {
+    return reject("protected-process-missing-from-snapshot", {
+      protectedPid: protectedPidNumber,
+    });
+  }
   for (const [pid, ppid] of parents) {
     if (pid !== 0 && children.has(ppid)) children.get(ppid).push(pid);
   }
 
   const collectSubtree = rootPid => {
     const subtree = new Set();
-    const pending = [rootPid];
+    const pending = [[rootPid, [rootPid]]];
     while (pending.length) {
-      const pid = pending.pop();
-      if (subtree.has(pid)) return null;
+      const [pid, path] = pending.pop();
+      if (subtree.has(pid)) {
+        const cycleStart = path.indexOf(pid);
+        return {
+          cyclePids: path.slice(cycleStart),
+        };
+      }
       subtree.add(pid);
-      pending.push(...(children.get(pid) || []));
+      for (const childPid of children.get(pid) || []) {
+        pending.push([childPid, [...path, childPid]]);
+      }
     }
-    return subtree;
+    return { subtree };
   };
 
-  const protectedSubtree = collectSubtree(protectedPidNumber);
-  if (!protectedSubtree || protectedSubtree.has(target)) return null;
+  const protectedResult = collectSubtree(protectedPidNumber);
+  if (protectedResult.cyclePids) {
+    return reject("protected-process-tree-cycle", {
+      cyclePids: protectedResult.cyclePids,
+    });
+  }
+  const protectedSubtree = protectedResult.subtree;
+  if (protectedSubtree.has(target)) {
+    return reject("target-is-inside-protected-process-tree", {
+      targetPid: target,
+      protectedPid: protectedPidNumber,
+    });
+  }
 
   // Retire the target tree from leaves upward, but exclude the protected
   // process and every child visible beneath it in this same process snapshot.
@@ -304,20 +369,31 @@ function protectedRetirementPlan(processes, targetPid, protectedPid) {
   // Windows taskkill /T) whose recursion can outlive or reinterpret PPID links.
   const pids = [];
   const visiting = new Set();
+  const visitingPath = [];
   const visited = new Set();
   const appendPostorder = pid => {
-    if (visiting.has(pid)) return false;
+    if (visiting.has(pid)) {
+      const cycleStart = visitingPath.indexOf(pid);
+      return [...visitingPath.slice(cycleStart), pid];
+    }
     if (visited.has(pid)) return true;
     visiting.add(pid);
+    visitingPath.push(pid);
     for (const childPid of children.get(pid) || []) {
-      if (!protectedSubtree.has(childPid) && !appendPostorder(childPid)) return false;
+      if (protectedSubtree.has(childPid)) continue;
+      const result = appendPostorder(childPid);
+      if (result !== true) return result;
     }
     visiting.delete(pid);
+    visitingPath.pop();
     visited.add(pid);
     pids.push(pid);
     return true;
   };
-  if (!appendPostorder(target)) return null;
+  const appendResult = appendPostorder(target);
+  if (appendResult !== true) {
+    return reject("target-process-tree-cycle", { cyclePids: appendResult });
+  }
   return { pids };
 }
 
@@ -346,9 +422,10 @@ function processSnapshotDetails(processes, targetPid, protectedPid) {
   };
 }
 
-function protectedProcessSnapshotError(processes, targetPid, protectedPid) {
+function protectedProcessSnapshotError(processes, targetPid, protectedPid, rejection) {
   return new Error(
     `拒绝停止进程 ${targetPid}：updater ${protectedPid} 的进程快照无效或存在祖先冲突 `
+    + `${JSON.stringify(rejection || { reason: "unknown-snapshot-rejection" })} `
     + JSON.stringify(processSnapshotDetails(processes, targetPid, protectedPid)),
   );
 }
@@ -447,17 +524,20 @@ async function stopOwnedPort(port, required, protectedPid) {
   const pids = state.owned.map(info => Number(info.pid));
   if (protectedPid) {
     const processes = await findProcess("name", "");
-    const byPid = new Map(processes.map(info => [Number(info.pid), info]));
+    const byPid = new Map((Array.isArray(processes) ? processes : []).map(info => [Number(info?.pid), info]));
     const planned = new Map();
     for (const pid of pids) {
       if (planned.has(pid)) continue;
       const target = byPid.get(pid);
+      let rejection;
+      const plan = protectedRetirementPlan(processes, pid, protectedPid, value => {
+        rejection = value;
+      });
       if (!target) {
         if (!processIsRunning(pid)) continue;
-        throw protectedProcessSnapshotError(processes, pid, protectedPid);
+        throw protectedProcessSnapshotError(processes, pid, protectedPid, rejection);
       }
-      const plan = protectedRetirementPlan(processes, pid, protectedPid);
-      if (!plan) throw protectedProcessSnapshotError(processes, pid, protectedPid);
+      if (!plan) throw protectedProcessSnapshotError(processes, pid, protectedPid, rejection);
       for (const plannedPid of plan.pids) {
         const info = byPid.get(plannedPid);
         if (!info) throw protectedProcessSnapshotError(processes, pid, protectedPid);
