@@ -11,7 +11,7 @@
 | `pocket_platform` / `flutter.platform` | 显式依赖并注册 `PocketPlatformPlugin`；CLI `--platform-experience` | `platform.systemUi.set`、`platform.haptics.perform` |
 | `pocket_platform` / `flutter.links` | 注册带 scheme 的 `PocketDeepLinkPlugin` 并配置原生 scheme；CLI `--deep-link-scheme=...` | `platform.links.initial/latest/events` |
 | `pocket_dio` / `dart.dio` | 显式依赖并注册 `PocketDioPlugin`；CLI `--dio` | `dio.request`，独立 IO Worker isolate 中的有界 HTTP 请求 |
-| `pocket_clipboard` / `flutter.clipboard` | 显式依赖并注册 `PocketClipboardPlugin`；宿主授予 `clipboard.read` / `clipboard.write` | `clipboard.readText/hasText/writeText`，仅纯文本，192 KiB 上限；详见 [CLIPBOARD_PLUGIN.md](CLIPBOARD_PLUGIN.md) |
+| `pocket_clipboard` / `flutter.clipboard` | 显式依赖并注册 `PocketClipboardPlugin`；CLI `--clipboard`；宿主授予 `clipboard.read` / `clipboard.write` | `clipboard.readText/hasText/writeText`，仅纯文本，192 KiB 上限；详见 [CLIPBOARD_PLUGIN.md](CLIPBOARD_PLUGIN.md) |
 
 系统运行时、平台代理与调试录制还使用内部插件。OTA 下载使用 `pocket_services` 的 `http`；Worker 的 `net.http` 使用原有 Worker IO 通道。这两者不要求安装 Dio。Dio 不替换这两个已工作的实现。
 

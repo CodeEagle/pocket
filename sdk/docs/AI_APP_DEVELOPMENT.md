@@ -250,10 +250,10 @@ bun sdk/pocket.ts init /path/to/weather --location --weather
 
 # 网络、系统触觉/系统栏、Deep Link 也都是显式 opt-in
 bun sdk/pocket.ts init /path/to/app \
-  --dio --platform-experience --deep-link-scheme=myapp
+  --dio --clipboard --platform-experience --deep-link-scheme=myapp
 ```
 
-可选模块包括 `pocket_permissions`、`pocket_camera`、`pocket_bluetooth`、`pocket_sensors`、`pocket_location`、`pocket_biometrics`、`pocket_weather`、`pocket_platform` 和 `pocket_dio`。
+可选模块包括 `pocket_permissions`、`pocket_camera`、`pocket_bluetooth`、`pocket_sensors`、`pocket_location`、`pocket_biometrics`、`pocket_weather`、`pocket_platform`、`pocket_dio` 和 `pocket_clipboard`（`--clipboard`，详见 CLIPBOARD_PLUGIN.md）。
 
 Dio 插件的 `dio.request` 自动使用独立 Dart IO Worker isolate 执行请求、读流和解码，保留 `createPocketDioClient(host)` 接口；纯 Dio 接入不需要另建 `domains.worker`，继续使用 `network` 权限与插件 `allowedOrigins`。官方 JS `net.http` 则使用 `domains.worker` 和 `workerHttpOrigins`，两套授权不可混用。游戏重计算按需走官方业务 Worker；Web `renderWorker` 是独立渲染开关，默认关闭。
 

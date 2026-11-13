@@ -74,6 +74,13 @@ final config = PocketAppConfig(
 );
 ```
 
+New projects can opt in with `bun pocket.ts init /path/to/app --clipboard`. It adds the
+`pocket_clipboard` path dependency, the `createClipboardPlugin` factory, an explicit
+`allowedPermissions` of `clipboard.read` / `clipboard.write` (removing `clipboard.read`
+disables reads), the guest manifest capabilities/permissions below, and `clipboard: true`
+in `editor.json`. It composes with `--dio` and `--hardware`, and needs no Android/iOS
+platform patch, so re-running generation does not duplicate anything.
+
 Guest `manifest.json`:
 
 ```json
@@ -125,5 +132,6 @@ client, per-capability error codes) and `pocket_permissions` (per-capability
   the prebuilt `@pocket/tools-*` guest toolchain.
 - `python3 scripts/check_architecture.py`.
 
-Not covered: real iOS/Android clipboard behaviour on device; `pocket init
---clipboard` scaffolding (add the path dependency and factory by hand).
+- `scripts/tests/clipboard_scaffold.test.ts`: default absence, `--clipboard` pubspec/main.dart/manifest/editor.json, combination with `--dio`/hardware, deterministic output.
+
+Not covered: real iOS/Android clipboard behaviour on device.
