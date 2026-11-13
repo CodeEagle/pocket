@@ -41,6 +41,7 @@ void main() {
     required List<String> optional,
     required List<String> declared,
     PocketClipboardPlugin? plugin,
+    String appId = 'dev.test',
   }) async {
     final host = PocketHost(
       registry: PocketHostRegistry(),
@@ -50,7 +51,7 @@ void main() {
     );
     final manager = PocketPluginManager(
       host: host,
-      appId: 'dev.test',
+      appId: appId,
       sessionId: '1',
       allowedPermissions: hostAllowed,
     );
@@ -199,5 +200,74 @@ void main() {
       plugin.writeText({'text': 7}),
       throwsA(isA<PocketCapabilityException>().having((e) => e.code, 'code', 'invalid_params')),
     );
+  });
+
+  Future<PocketPluginManager> fullAdmit() => admit(
+    hostAllowed: {'clipboard.read', 'clipboard.write'},
+    optional: PocketClipboardCapabilities.all.toList(),
+    declared: ['clipboard.read', 'clipboard.write'],
+  );
+
+  test('192 KiB ASCII text written can be read back', () async {
+    final manager = await fullAdmit();
+    final text = 'a' * pocketClipboardMaxTextBytes;
+    expect(await manager.invoke('clipboard.writeText', {'text': text}), {'ok': true});
+    final read = await manager.invoke('clipboard.readText') as Map;
+    expect((read['text'] as String).length, pocketClipboardMaxTextBytes);
+  });
+
+  test('escape-heavy text reads while the encoded form fits, else too_large', () async {
+    final manager = await fullAdmit();
+    // 100 KiB of quotes encode to 200 KiB + 2: over the raw limit, under quota.
+    clipboardText = '"' * (100 * 1024);
+    final read = await manager.invoke('clipboard.readText') as Map;
+    expect((read['text'] as String).length, 100 * 1024);
+    // 192 KiB of quotes (and of control characters) escape far past the budget.
+    for (final ch in ['"', '\u0001']) {
+      clipboardText = ch * pocketClipboardMaxTextBytes;
+      await expectLater(
+        manager.invoke('clipboard.readText'),
+        throwsA(isA<PocketCapabilityException>().having((e) => e.code, 'code', 'too_large')),
+      );
+    }
+  });
+
+  test('192 KiB + 1 write is too_large and leaves the clipboard unchanged', () async {
+    final manager = await fullAdmit();
+    clipboardText = 'keep';
+    await expectLater(
+      manager.invoke('clipboard.writeText', {'text': 'a' * (pocketClipboardMaxTextBytes + 1)}),
+      throwsA(isA<PocketCapabilityException>().having((e) => e.code, 'code', 'too_large')),
+    );
+    expect(clipboardText, 'keep');
+  });
+
+  test('descriptor response quota stays under the 256 KiB bridge message', () {
+    final quota = PocketClipboardPlugin().descriptor.limits.maxResponseBytes!;
+    expect(quota, greaterThan(pocketClipboardMaxTextBytes + 2 + 9));
+    expect(quota, lessThan(256 * 1024));
+  });
+
+  test('a child guest without its own grant cannot read although another app has it', () async {
+    clipboardText = 'secret';
+    final parent = await admit(
+      appId: 'dev.parent',
+      hostAllowed: {'clipboard.read', 'clipboard.write'},
+      optional: PocketClipboardCapabilities.all.toList(),
+      declared: ['clipboard.read', 'clipboard.write'],
+    );
+    final child = await admit(
+      appId: 'dev.parent.child',
+      hostAllowed: {'clipboard.read', 'clipboard.write'},
+      optional: const <String>[],
+      declared: const <String>[],
+    );
+    expect(await parent.invoke('clipboard.readText'), {'text': 'secret'});
+    calls.clear();
+    await expectLater(
+      child.invoke('clipboard.readText'),
+      throwsA(isA<PocketCapabilityException>()),
+    );
+    expect(calls, isNot(contains('Clipboard.getData')));
   });
 }

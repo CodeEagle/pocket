@@ -87,14 +87,19 @@ Host -> guest events: `textInput.rawOpened {id}` after attachment, and
 `textInput.rawDismiss {id, reason}` when the host ends the session. Reasons: `unavailable`,
 `replaced` (another raw or `InputField` session opened), `blur` (keyboard focus lost),
 `platform` (IME connection closed), `inactive`, `focus.lost`, `compositor.focus`,
-`runtime.dispose`.
+`runtime.dispose`. The host also dismisses an open raw session with `unavailable` when
+`rawTextInputEnabled` or `keyboardInputEnabled` is switched off on the mounted `PocketView`.
 
 While a session is open (events go through the existing `input.text` path):
 
 1. Key edges: `{"kind":"keyDown"|"keyUp","key":"ArrowLeft","repeat":true,"modifiers":3}`;
    `repeat` and `modifiers` are omitted when false/0. Key names follow `KeyboardEvent.key`
    (`a`, `Enter`, `Backspace`, `ArrowLeft`, `Shift`, ...; left/right modifier variants collapse).
-   Modifier keys are forwarded too.
+   Modifier keys are forwarded too. The `keyUp` (and `repeat`) name always equals the name sent
+   with the matching `keyDown` for the same physical key, even if Shift was released first or the
+   platform gives no character on key-up (`Shift+A` down, `A` up, never `a`): the host remembers
+   the name per physical key until the up edge and clears it when the session closes or focus is
+   lost. A guest tracking held keys by `key` therefore never sticks.
 2. IME and printable text use a `DeltaTextInputClient` (`PocketRawTextClient`):
    `{"kind":"composition","text":"ni","selectionStart":2,"selectionEnd":2}` (marked text; offsets
    relative to it, UTF-16 units), `{"kind":"compositionEnd"}`, `{"kind":"commit","text":"你"}`.
@@ -105,10 +110,22 @@ While a session is open (events go through the existing `input.text` path):
 4. A `textInput.open` (`InputField`) session and a raw session never coexist; the newer one wins and
    the older gets a dismiss.
 
-Key forwarding policy (assumptions to confirm on macOS): printable keys without Control/Meta are
-returned as "ignored" so the platform IME also receives them; other keys are "handled" so focus
-traversal and shortcuts cannot take them. While a composition is active only `keyUp` edges are
-forwarded: Enter, arrows, Space and Escape belong to the IME then (like DOM `isComposing`).
+Key forwarding policy (assumptions to confirm on macOS): printable keys are returned as "ignored"
+so the platform IME also receives them. "Printable" means the event carries text (one or more
+non-control code points, so emoji sequences count) and no Control/Meta is held, or Control+Alt
+without Meta is held together with such text: Windows/Linux report AltGr as Control+Alt, so `@`
+and the euro sign stay with the IME (the key edge is still forwarded). Control or Meta alone
+(`Control+z`, `Meta+s`) and Control+Alt without text are "handled" shortcuts so focus traversal
+cannot take them. While a composition is active only `keyUp` edges are forwarded: Enter, arrows,
+Space and Escape belong to the IME then (like DOM `isComposing`).
+
+Enter policy: Enter is forwarded as a key edge (`Enter`) and returned "handled". Some platform IMEs
+also insert `"\n"` through the delta client for the same keystroke; to deliver it once, the client
+drops a lone `"\n"` insertion in the first IME update after a forwarded Enter keyDown (cleared by
+any update, by the Enter keyUp, and on detach). A newline not tied to an Enter keyDown (soft
+keyboard, paste of one newline after other input) is still committed. Residual risk: an IME that
+delivers its newline after the Enter keyUp, or after another key, would still produce a commit;
+needs the macOS check below.
 
 Limits: `commit` and `composition` text is at most 4096 UTF-8 bytes per event. Larger commits are
 split on code point boundaries (never inside a surrogate pair). Marked text over the cap is
@@ -125,7 +142,8 @@ commit, plus the session id and caret rect). No policy or text model lives in Da
 Commands run from `sdk/packages/pocket_flutter` with `PATH=/opt/flutter/bin:$PATH` and
 `POCKET_NATIVE_LIBRARY=/home/user/pocket/sdk/native/target/debug/libpocket_flutter.so`:
 
-- `flutter test test/pocket_raw_text_input_test.dart` (8): rawOpen attach, caret rect, key names,
+- `flutter test test/pocket_raw_text_input_test.dart` (12; the last four cover keyUp name pairing,
+  AltGr/multi-rune/shortcut key handling, single Enter delivery and lifecycle dismiss on gate-off): rawOpen attach, caret rect, key names,
   repeat, modifiers, no `input.buttons`, pinyin composition and candidate commit, cancel, dead key,
   non-BMP offsets, 4096-byte split, keys during composition, TextField replaces raw, gate off,
   rawClose restores button keys. IME updates are injected through the real
@@ -137,8 +155,8 @@ Commands run from `sdk/packages/pocket_flutter` with `PATH=/opt/flutter/bin:$PAT
   `test/pocket_view_text_cache_test.dart` (5).
 - `cargo test --locked --lib key_modifiers_fold` (Rust admission and guest-visible names).
 - `bun packages/pocket_ui/test/probe/input_field_multiline.probe.ts` via
-  `packages/pocket_ui/test/input_field_multiline.test.ts` (separate process because it installs
-  module mocks).
+  `packages/pocket_ui/test/input_field_multiline.test.ts` (5 bun tests; the probe runs in a
+  separate process because it installs module mocks).
 
 Linux has no Pocket host app and no real IME, so none of this proves platform IME behaviour.
 
@@ -162,3 +180,11 @@ Run a guest-drawn editor with `rawTextInputEnabled: true` on macOS (Apple Silico
 7. Confirm the "ignored"/"handled" return values do not break IME delivery (macOS skips the text
    input plugin for handled events) and that IME text is not duplicated.
 8. Open an `InputField` while raw is active and the reverse; check `rawDismiss reason=replaced`.
+9. Held-key pairing: hold Shift, press and release `A` (also release Shift before `A`): `keyDown`
+   and `keyUp` carry the same `key` (`A`); same for `?`/`@` on other layouts.
+10. AltGr layouts (German/Polish keyboards on a Windows/Linux machine, or Option layers on macOS):
+    `@`, euro and accented letters arrive once as `commit`, with a forwarded key edge.
+11. Enter: a plain Enter gives one `keyDown`/`keyUp` and no extra `commit "\n"`; Enter inside a
+    Japanese conversion commits the composition without a stray newline.
+12. Toggle `rawTextInputEnabled`/`keyboardInputEnabled` off while a session is open: guest gets
+    `rawDismiss reason=unavailable` and the IME hides.

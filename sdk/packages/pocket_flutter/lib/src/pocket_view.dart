@@ -1045,6 +1045,8 @@ class _PocketViewState extends State<PocketView>
   // Raw text-input session (guest-requested via `textInput.rawOpen`). The
   // only host state is the platform client binding; app policy stays in JS.
   String? _rawTextInputId;
+  final Map<PhysicalKeyboardKey, String> _rawKeyNames =
+      <PhysicalKeyboardKey, String>{};
   Rect? _rawTextInputRect;
   PocketRawTextClient? _rawTextClient;
   Size _rawTextScale = const Size(1, 1);
@@ -1245,14 +1247,45 @@ class _PocketViewState extends State<PocketView>
     if (client == null) return KeyEventResult.ignored;
     final composing = client.isComposing;
     final modifiers = pocketRawTextModifiers();
-    final key = pocketRawKeyName(event.logicalKey, event.character);
-    final isPrintable =
-        key.runes.length == 1 &&
-        key.codeUnitAt(0) >= 0x20 &&
-        (modifiers &
-                (pocketTextModifierControl | pocketTextModifierMeta)) ==
-            0;
+    final physical = event.physicalKey;
+    // keyDown decides the name; repeat and keyUp reuse it. KeyUpEvent never
+    // carries a character, so recomputing would turn "A" into "a" and leave a
+    // guest that tracks held keys with a stuck key.
+    final String key;
+    if (event is KeyDownEvent) {
+      key = pocketRawKeyName(event.logicalKey, event.character);
+      _rawKeyNames[physical] = key;
+    } else {
+      key =
+          _rawKeyNames[physical] ??
+          pocketRawKeyName(event.logicalKey, event.character);
+      if (event is KeyUpEvent) _rawKeyNames.remove(physical);
+    }
+    final control = (modifiers & pocketTextModifierControl) != 0;
+    final alt = (modifiers & pocketTextModifierAlt) != 0;
+    final meta = (modifiers & pocketTextModifierMeta) != 0;
+    final character = event.character;
+    final characterPrintable =
+        character != null &&
+        character.isNotEmpty &&
+        character.runes.every(
+          (r) => r >= 0x20 && r != 0x7f && !(r >= 0x80 && r < 0xa0),
+        );
+    // Windows/Linux report AltGr as Control+Alt: the platform produced text,
+    // so it belongs to the IME.
+    final altGr = control && alt && !meta && characterPrintable;
+    final plain =
+        !control &&
+        !meta &&
+        (characterPrintable ||
+            (key.runes.length == 1 && key.codeUnitAt(0) >= 0x20));
+    final isPrintable = altGr || plain;
     if (!composing || event is KeyUpEvent) {
+      if (event is KeyDownEvent && key == 'Enter') {
+        client.suppressNextNewline();
+      } else if (event is KeyUpEvent && key == 'Enter') {
+        client.cancelNewlineSuppression();
+      }
       _sendRawText(
         () => _controller.sendTextEvent(
           kind: event is KeyUpEvent ? 'keyUp' : 'keyDown',
@@ -1329,6 +1362,7 @@ class _PocketViewState extends State<PocketView>
       onFocusChange: (focused) {
         if (!focused) {
           _clearKeyboardButtons();
+          _rawKeyNames.clear();
           if (_rawTextInputId != null) {
             // Defer: focus listeners run while the manager iterates.
             WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1527,6 +1561,11 @@ class _PocketViewState extends State<PocketView>
     if (oldWidget.keyboardInputEnabled && !widget.keyboardInputEnabled) {
       _clearKeyboardButtons();
       _keyboardFocusNode.unfocus();
+    }
+    if (_rawTextInputId != null &&
+        ((oldWidget.rawTextInputEnabled && !widget.rawTextInputEnabled) ||
+            (oldWidget.keyboardInputEnabled && !widget.keyboardInputEnabled))) {
+      _dismissRawTextInput(reason: 'unavailable', rebuild: false);
     }
     if (!mapEquals(oldWidget.keyboardButtonMap, widget.keyboardButtonMap)) {
       // Recompute from the physical keys still held. This matters when an app
@@ -1922,8 +1961,9 @@ class _PocketViewState extends State<PocketView>
               : FfiPocketRuntime.open(
                   recording: (() {
                     final controller = widget.recordingFactory?.call();
-                    _ownedRecordingController
-                        ?.removeAfterFinishListener(_onOwnedRecordingFinished);
+                    _ownedRecordingController?.removeAfterFinishListener(
+                      _onOwnedRecordingFinished,
+                    );
                     _ownedRecordingController = controller;
                     controller?.addAfterFinishListener(
                       _onOwnedRecordingFinished,
@@ -2977,9 +3017,7 @@ class _PocketViewState extends State<PocketView>
     }
   }
 
-  void _deliverPerformanceSample(
-    PocketPerformanceSample sample,
-  ) {
+  void _deliverPerformanceSample(PocketPerformanceSample sample) {
     final callback = widget.onPerformanceSample;
     if (callback != null) {
       try {
@@ -6361,6 +6399,7 @@ class _PocketViewState extends State<PocketView>
     }
     _rawTextClient?.detach();
     _rawTextClient = null;
+    _rawKeyNames.clear();
     _rawTextInputId = null;
     _rawTextInputRect = null;
     if (mounted) _markEditorNeedsBuild();

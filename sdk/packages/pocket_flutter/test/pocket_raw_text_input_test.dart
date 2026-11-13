@@ -232,13 +232,7 @@ void main() {
       ),
     ]);
     await _deltas(tester, <Map<String, dynamic>>[
-      _delta(
-        oldText: 'ni',
-        deltaText: '你',
-        start: 0,
-        end: 2,
-        selection: 1,
-      ),
+      _delta(oldText: 'ni', deltaText: '你', start: 0, end: 2, selection: 1),
     ]);
     expect(runtime.textEvents, <Map<String, dynamic>>[
       <String, dynamic>{
@@ -452,5 +446,159 @@ void main() {
       runtime.named('input.buttons').map((e) => e['buttons']).toList(),
       containsAll(<int>[0x0020]),
     );
+  });
+
+  Future<_RawRuntime> openRaw(WidgetTester tester) async {
+    final runtime = _RawRuntime(
+      initialEvents: <PocketEvent>[_event('textInput.rawOpen', _rawOpen('r1'))],
+    );
+    await _pump(tester, runtime);
+    runtime.messages.clear();
+    return runtime;
+  }
+
+  List<String> keyPairs(_RawRuntime runtime) =>
+      runtime.textEvents.map((e) => '${e['kind']}:${e['key']}').toList();
+
+  testWidgets('keyUp reuses the keyDown name for printable keys', (
+    tester,
+  ) async {
+    final runtime = await openRaw(tester);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyA, character: 'A');
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyA, character: 'A');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyA);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    // Shift released first: the up must still match the down.
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.slash, character: '?');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.slash);
+    expect(keyPairs(runtime), <String>[
+      'keyDown:Shift',
+      'keyDown:A',
+      'keyDown:A',
+      'keyUp:A',
+      'keyUp:Shift',
+      'keyDown:Shift',
+      'keyDown:?',
+      'keyUp:Shift',
+      'keyUp:?',
+    ]);
+  });
+
+  testWidgets('AltGr text and multi-rune characters reach the IME', (
+    tester,
+  ) async {
+    final runtime = await openRaw(tester);
+    Future<KeyEventResult?> result(LogicalKeyboardKey key, String? ch) async {
+      KeyEventResult? out;
+      final focus = FocusManager.instance.primaryFocus!;
+      // Probe the real handler through the focus node.
+      final event = KeyDownEvent(
+        physicalKey: PhysicalKeyboardKey.keyQ,
+        logicalKey: key,
+        character: ch,
+        timeStamp: Duration.zero,
+      );
+      out = focus.onKeyEvent?.call(focus, event);
+      return out;
+    }
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+    expect(await result(LogicalKeyboardKey.keyQ, '@'), KeyEventResult.ignored);
+    expect(
+      await result(LogicalKeyboardKey.keyE, '\u20ac'),
+      KeyEventResult.ignored,
+    );
+    // Control+Alt without text stays a shortcut.
+    expect(
+      await result(LogicalKeyboardKey.delete, null),
+      KeyEventResult.handled,
+    );
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+    // Control alone with a control character is a handled shortcut.
+    expect(
+      await result(LogicalKeyboardKey.keyZ, '\u001a'),
+      KeyEventResult.handled,
+    );
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    expect(await result(LogicalKeyboardKey.keyS, 's'), KeyEventResult.handled);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    // Multi-rune (emoji / combined) character is printable.
+    expect(
+      await result(LogicalKeyboardKey.keyA, '\u{1F469}\u200D\u{1F4BB}'),
+      KeyEventResult.ignored,
+    );
+    expect(keyPairs(runtime), contains('keyDown:@'));
+  });
+
+  testWidgets('Enter key is delivered once even if the IME commits newline', (
+    tester,
+  ) async {
+    final runtime = await openRaw(tester);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+    await _deltas(tester, <Map<String, dynamic>>[
+      _delta(oldText: '', deltaText: '\n', start: 0, end: 0, selection: 1),
+    ]);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+    expect(runtime.textEvents.map((e) => e['kind']).toList(), <String>[
+      'keyDown',
+      'keyUp',
+    ]);
+    // A newline that is not tied to an Enter keyDown (soft keyboard) commits.
+    await _deltas(tester, <Map<String, dynamic>>[
+      _delta(oldText: '', deltaText: '\n', start: 0, end: 0, selection: 1),
+    ]);
+    expect(runtime.textEvents.last, <String, dynamic>{
+      'kind': 'commit',
+      'text': '\n',
+    });
+    // Suppression does not eat ordinary text after Enter.
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+    await _deltas(tester, <Map<String, dynamic>>[
+      _delta(oldText: '', deltaText: 'x', start: 0, end: 0, selection: 1),
+    ]);
+    expect(runtime.textEvents.last['text'], 'x');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+  });
+
+  testWidgets('disabling raw or keyboard input dismisses the session', (
+    tester,
+  ) async {
+    for (final turnOff in <String>['raw', 'keyboard']) {
+      final runtime = _RawRuntime(
+        initialEvents: <PocketEvent>[
+          _event('textInput.rawOpen', _rawOpen('r-$turnOff')),
+        ],
+      );
+      await _pump(tester, runtime);
+      expect(tester.testTextInput.hasAnyClients, isTrue);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 320,
+            height: 480,
+            child: PocketView(
+              runtime: runtime,
+              jsSource: '',
+              pakBytes: Uint8List(0),
+              rawTextInputEnabled: turnOff != 'raw',
+              keyboardInputEnabled: turnOff != 'keyboard',
+              showDebugFps: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(runtime.named('textInput.rawDismiss'), <Map<String, dynamic>>[
+        <String, dynamic>{'id': 'r-$turnOff', 'reason': 'unavailable'},
+      ], reason: turnOff);
+      expect(tester.testTextInput.hasAnyClients, isFalse, reason: turnOff);
+      await tester.pumpWidget(const SizedBox());
+    }
   });
 }

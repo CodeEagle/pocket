@@ -96,32 +96,43 @@ function openWith(extra: Record<string, unknown>): any {
   return payload;
 }
 
-// Default: exactly the historical single-line metadata.
-const single = openWith({});
-assert.equal(single.keyboardType, "text");
-assert.equal(single.action, "done");
-assert.equal(single.maxLines, 1);
-assert.equal(Object.hasOwn(single, "minLines"), false);
-const keys = Object.keys(single);
-assert.ok(keys.indexOf("keyboardType") < keys.indexOf("action") && keys.indexOf("action") < keys.indexOf("maxLines"));
-assert.equal(JSON.stringify(openWith({ multiline: false, maxLines: 9, minLines: 3 })).includes('"minLines"'), false);
+// Each section prints "ok <name>"; a failed assertion throws and exits non-zero.
+function check(name: string, fn: () => void): void {
+  fn();
+  console.log(`ok ${name}`);
+}
 
-// Unbounded multi-line: explicit null maxLines.
-const unbounded = openWith({ multiline: true });
-assert.equal(unbounded.keyboardType, "multiline");
-assert.equal(unbounded.action, "newline");
-assert.equal(unbounded.maxLines, null);
-assert.equal(Object.hasOwn(unbounded, "maxLines"), true);
-assert.equal(Object.hasOwn(unbounded, "minLines"), false);
+check('single-line default payload is unchanged', () => {
+  // Default: exactly the historical single-line metadata.
+  const single = openWith({});
+  assert.equal(single.keyboardType, "text");
+  assert.equal(single.action, "done");
+  assert.equal(single.maxLines, 1);
+  assert.equal(Object.hasOwn(single, "minLines"), false);
+  const keys = Object.keys(single);
+  assert.ok(keys.indexOf("keyboardType") < keys.indexOf("action") && keys.indexOf("action") < keys.indexOf("maxLines"));
+  assert.equal(JSON.stringify(openWith({ multiline: false, maxLines: 9, minLines: 3 })).includes('"minLines"'), false);});
 
-// Bounded, with a minimum (clamped to the maximum).
-const bounded = openWith({ multiline: true, maxLines: 6, minLines: 3 });
-assert.equal(bounded.maxLines, 6);
-assert.equal(bounded.minLines, 3);
-assert.equal(openWith({ multiline: true, maxLines: 2, minLines: 5 }).minLines, 2);
-// Invalid numbers fall back to unbounded / omitted.
-const invalid = openWith({ multiline: true, maxLines: 0, minLines: Number.NaN });
-assert.equal(invalid.maxLines, null);
-assert.equal(Object.hasOwn(invalid, "minLines"), false);
+check('unbounded multiline uses explicit null maxLines', () => {
+  // Unbounded multi-line: explicit null maxLines.
+  const unbounded = openWith({ multiline: true });
+  assert.equal(unbounded.keyboardType, "multiline");
+  assert.equal(unbounded.action, "newline");
+  assert.equal(unbounded.maxLines, null);
+  assert.equal(Object.hasOwn(unbounded, "maxLines"), true);
+  assert.equal(Object.hasOwn(unbounded, "minLines"), false);});
 
-console.log("input_field_multiline.test: single-line payload unchanged; multiline payload passed");
+check('bounded multiline clamps minLines', () => {
+  // Bounded, with a minimum (clamped to the maximum).
+  const bounded = openWith({ multiline: true, maxLines: 6, minLines: 3 });
+  assert.equal(bounded.maxLines, 6);
+  assert.equal(bounded.minLines, 3);
+  assert.equal(openWith({ multiline: true, maxLines: 2, minLines: 5 }).minLines, 2);});
+
+check('invalid line counts fall back', () => {
+  // Invalid numbers fall back to unbounded / omitted.
+  const invalid = openWith({ multiline: true, maxLines: 0, minLines: Number.NaN });
+  assert.equal(invalid.maxLines, null);
+  assert.equal(Object.hasOwn(invalid, "minLines"), false);});
+
+console.log("input_field_multiline.test: payload probe finished");

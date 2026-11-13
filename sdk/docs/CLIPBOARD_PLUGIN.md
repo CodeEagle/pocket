@@ -23,13 +23,19 @@ permission because clipboard presence is itself observable data.
 
 ## Limits
 
-- Text payloads are at most 192 KiB of UTF-8 (`pocketClipboardMaxTextBytes`),
-  which leaves room for JSON escaping under the 256 KiB control message. A host
-  may lower it with `PocketClipboardPlugin(maxTextBytes: ...)` but not raise it.
+- Text payloads are at most 192 KiB of UTF-8 (`pocketClipboardMaxTextBytes`). A host may lower
+  it with `PocketClipboardPlugin(maxTextBytes: ...)` but not raise it.
+- The descriptor's response quota is 250 KiB (`maxResponseBytes`). The framework charges the
+  result `{"text":<JSON string>}` (9 bytes of framing plus the JSON-encoded string) against it, and
+  the bridge message cap is 256 KiB including the response envelope, hence 250 KiB. Any text
+  accepted by `writeText` and made of ordinary characters reads back (192 KiB ASCII encodes to
+  about 192 KiB + 2).
 - `writeText` with a larger string fails with `too_large`; the clipboard is left
   unchanged. A non-string `text` fails with `invalid_params`.
-- `readText` never truncates: if the clipboard text exceeds the limit (or its
-  JSON-escaped form exceeds 240 KiB) it fails with `too_large`.
+- `readText` never truncates: if the clipboard text exceeds the limit, or its JSON-escaped form
+  (quotes and control characters expand, up to 6x) exceeds the quota minus framing (250 KiB - 16
+  bytes), it fails with `too_large`. The plugin's check sits below the framework quota, so the
+  caller sees `too_large`, never `plugin_payload_quota`.
 - At most four concurrent requests (descriptor limit). No images, files, HTML or
   rich content, and no clipboard-change stream.
 
@@ -108,7 +114,10 @@ client, per-capability error codes) and `pocket_permissions` (per-capability
 - `flutter test` in `packages/pocket_clipboard`: mocked `SystemChannels.platform`
   clipboard through `PocketPluginManager` admission: round trip, null clipboard,
   host scope without read, undeclared capability/permission, undeclared name,
-  oversized write/read, multi-byte limit, invalid params.
+  oversized write/read, multi-byte limit, invalid params, 192 KiB ASCII round trip, escape-heavy
+  read (200 KiB encoded reads, 192 KiB of quotes/control characters is `too_large`), 192 KiB + 1
+  write, descriptor quota under 256 KiB, and a second app id without its own grant denied
+  `readText` while another app holds the grant (no platform clipboard call).
 - `bun test packages/pocket_ui/test/clipboard.test.ts`: request correlation and
   error mapping.
 - `packages/pocket_ui/test/clipboard_native.test.ts` (modelled on

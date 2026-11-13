@@ -24,9 +24,18 @@ abstract final class PocketClipboardCapabilities {
 /// JSON escaping and the envelope under the 256 KiB control message.
 const int pocketClipboardMaxTextBytes = 192 * 1024;
 
-/// Reads additionally require the JSON-encoded string to fit this budget,
-/// because control characters and quotes expand when escaped.
-const int _maxEncodedReadBytes = 240 * 1024;
+/// Descriptor response quota. The framework charges `{"text":<json string>}`
+/// (9 bytes of object framing plus the JSON-encoded string) against it, and the
+/// bridge message cap is 256 KiB including the response envelope, so this is
+/// 250 KiB: well above the 192 KiB raw limit plus quotes, with 6 KiB spare.
+const int _responseQuotaBytes = 250 * 1024;
+
+/// Reads additionally require the JSON-encoded string to fit the response
+/// quota minus the framework's object framing (with margin), because control
+/// characters and quotes expand when escaped. Being below the quota, this
+/// check always fires first and reports `too_large` instead of the
+/// framework's `plugin_payload_quota`.
+const int _maxEncodedReadBytes = _responseQuotaBytes - 16;
 
 const PocketPluginSchema _textSchema = PocketPluginSchema.object(
   properties: <String, PocketPluginSchema>{'text': PocketPluginSchema.string()},
@@ -115,7 +124,7 @@ final class PocketClipboardPlugin extends PocketPlugin {
     },
     limits: PocketPluginLimits(
       maxConcurrentRequests: 4,
-      maxResponseBytes: pocketClipboardMaxTextBytes,
+      maxResponseBytes: _responseQuotaBytes,
     ),
     capabilities: _capabilities,
   );

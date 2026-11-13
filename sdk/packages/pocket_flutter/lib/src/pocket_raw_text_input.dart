@@ -139,6 +139,14 @@ final class PocketRawTextClient implements DeltaTextInputClient {
   int _emitted = 0;
   bool _composing = false;
   String? _lastCompositionKey;
+  bool _suppressNewline = false;
+
+  /// Called after an Enter keyDown was forwarded as a key event: a lone "\n"
+  /// insertion in the next IME update is the same keystroke and is dropped, so
+  /// the guest receives Enter exactly once. Cleared by any update, by
+  /// [cancelNewlineSuppression] (Enter keyUp) and by [detach].
+  void suppressNextNewline() => _suppressNewline = true;
+  void cancelNewlineSuppression() => _suppressNewline = false;
 
   /// True while a marked (composing) region is active.
   bool get isComposing => _composing;
@@ -192,6 +200,7 @@ final class PocketRawTextClient implements DeltaTextInputClient {
     _emitted = 0;
     _composing = false;
     _lastCompositionKey = null;
+    _suppressNewline = false;
   }
 
   @override
@@ -255,7 +264,11 @@ final class PocketRawTextClient implements DeltaTextInputClient {
       _composing = false;
       _lastCompositionKey = null;
     }
-    if (text.length > _emitted) _commit(text.substring(_emitted));
+    if (text.length > _emitted) {
+      final inserted = text.substring(_emitted);
+      if (!(_suppressNewline && inserted == '\n')) _commit(inserted);
+    }
+    _suppressNewline = false;
     // Everything is reported; hand the platform an empty scratch buffer so a
     // later deletion cannot reach text the guest already owns.
     _value = TextEditingValue.empty;
