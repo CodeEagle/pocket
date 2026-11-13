@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, utimesSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -875,8 +875,8 @@ test("source upgrade applies the staged Git commit through the real service CLI 
     const expectedCompiler = join(installedTools, "compiler", "tools", "build.ts");
     const expectedProbe = join(installedTools, "bin", process.platform === "win32" ? "pocket_probe.exe" : "pocket_probe");
     const upgradedRecord = JSON.parse(readFileSync(pidFile, "utf8"));
-    expect(upgradedRecord.config.compilerPath).toBe(expectedCompiler);
-    expect(upgradedRecord.config.nativeProbe).toBe(expectedProbe);
+    expect(realpathSync(upgradedRecord.config.compilerPath)).toBe(realpathSync(expectedCompiler));
+    expect(realpathSync(upgradedRecord.config.nativeProbe)).toBe(realpathSync(expectedProbe));
     expect(existsSync(join(source.sdk, "native", "target", "release", process.platform === "win32" ? "pocket_probe.exe" : "pocket_probe"))).toBe(true);
 
     const restart = spawnSync(serviceCli, [serviceScript, "restart"], {
@@ -891,8 +891,8 @@ test("source upgrade applies the staged Git commit through the real service CLI 
     expect(thirdHealth).toMatchObject({ ok: true, version: "1.0.1" });
     expect(thirdHealth.pid).not.toBe(secondHealth.pid);
     const restartedRecord = JSON.parse(readFileSync(pidFile, "utf8"));
-    expect(restartedRecord.config.compilerPath).toBe(expectedCompiler);
-    expect(restartedRecord.config.nativeProbe).toBe(expectedProbe);
+    expect(realpathSync(restartedRecord.config.compilerPath)).toBe(realpathSync(expectedCompiler));
+    expect(realpathSync(restartedRecord.config.nativeProbe)).toBe(realpathSync(expectedProbe));
     expect(existsSync(source.stageDir)).toBe(false);
     expect(existsSync(join(source.sdk, ".pocket-build", "sdk-upgrade-backup-1.0.0"))).toBe(false);
   } catch (error) {
