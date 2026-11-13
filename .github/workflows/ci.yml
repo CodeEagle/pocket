@@ -116,7 +116,7 @@ jobs:
       - name: Install system patch tool
         run: |
           sudo apt-get update
-          sudo apt-get install -y patch llvm lld
+          sudo apt-get install -y patch llvm lld iproute2 net-tools lsof procps
 
       - name: Prepare pinned PocketJS upstream
         working-directory: sdk
@@ -175,6 +175,12 @@ jobs:
           path: demo/assets/apps/lantern
           if-no-files-found: error
 
+      - name: Verify Studio upgrade lifecycle before packaging
+        working-directory: sdk
+        env:
+          POCKET_SOURCE_BUILD: "1"
+        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts scripts/tests/editor_service.test.ts
+
       - name: Run SDK JS package and toolchain suites
         working-directory: sdk
         env:
@@ -196,12 +202,6 @@ jobs:
             editor/test/preview_text_transform.test.ts \
             editor/test/preview_recording_host_fonts.test.ts
 
-      - name: Verify Studio upgrade lifecycle before packaging
-        working-directory: sdk
-        env:
-          POCKET_SOURCE_BUILD: "1"
-        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts scripts/tests/editor_service.test.ts
-
       - name: Run Showcase guest compilation, ablation, and native probe suites
         env:
           POCKET_WEB_RUNTIME: ${{ github.workspace }}/sdk/.pocket-build/web-engine/pocket-web.js
@@ -210,6 +210,17 @@ jobs:
           POCKET_BYTECODE_BIN: ${{ github.workspace }}/sdk/native/target/release/pocketjs_bytecode
           POCKET_NATIVE_PROBE: ${{ github.workspace }}/sdk/native/target/release/pocket_probe
         run: bash demo/js/scripts/test_guest.sh
+
+      - name: Preserve failed Studio upgrade diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-upgrade-linux-diagnostics
+          include-hidden-files: true
+          if-no-files-found: ignore
+          path: |
+            /tmp/pocket-e2e-real-*/.pocket-build/**/*.log
+            /tmp/pocket-e2e-real-*/.pocket-build/**/*.json
 
   flutter-sdk-and-demo:
     name: flutter-sdk-and-demo
