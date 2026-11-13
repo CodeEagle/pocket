@@ -228,6 +228,10 @@ process.on("SIGTERM", () => server.stop(true));
 `);
 
   fixtureGit(repo, "init", "--initial-branch=main");
+  fixtureGit(repo, "config", "core.autocrlf", "false");
+  fixtureGit(repo, "config", "core.eol", "lf");
+  expect(fixtureGit(repo, "config", "--local", "--get", "core.autocrlf")).toBe("false");
+  expect(fixtureGit(repo, "config", "--local", "--get", "core.eol")).toBe("lf");
   fixtureGit(repo, "config", "user.name", "Pocket Upgrade Test");
   fixtureGit(repo, "config", "user.email", "upgrade@example.invalid");
   fixtureGit(repo, "config", "commit.gpgsign", "false");
