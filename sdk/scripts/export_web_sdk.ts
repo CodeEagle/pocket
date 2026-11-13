@@ -149,6 +149,10 @@ function copySources(out: string): void {
   copyTree(join(SDK_ROOT, "native"), join(out, "native"));
   copyTree(join(SDK_ROOT, "packages/pocket_ui"), join(out, "packages/pocket_ui"));
   rmSync(join(out, "packages/pocket_ui/test"), { recursive: true, force: true });
+  for (const name of ["pocket_looseleaf", "pocket_arc"]) {
+    copyTree(join(SDK_ROOT, "packages", name), join(out, "packages", name));
+    rmSync(join(out, "packages", name, "test"), { recursive: true, force: true });
+  }
   copyTree(join(SDK_ROOT, "packages/pocket_tftc"), join(out, "packages/pocket_tftc"));
   rmSync(join(out, "packages/pocket_tftc/test"), { recursive: true, force: true });
   copyTree(join(SDK_ROOT, "packages/pocket_vn"), join(out, "packages/pocket_vn"));
@@ -213,7 +217,7 @@ function writeRepositoryFiles(out: string, platform?: Platform): void {
     type: "module",
     license: "MIT",
     engines: { node: ">=22.22.2" },
-    workspaces: ["packages/pocket_ui", "packages/pocket_tftc", "packages/pocket_spine", "packages/pocket_live2d", "packages/pocket_diagnostics"],
+    workspaces: ["packages/pocket_ui", "packages/pocket_looseleaf", "packages/pocket_arc", "packages/pocket_tftc", "packages/pocket_spine", "packages/pocket_live2d", "packages/pocket_diagnostics"],
     dependencies: {
       "@pocket/spine": "0.1.0",
       "@pocket/live2d": "0.1.0",

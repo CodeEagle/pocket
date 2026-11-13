@@ -5,11 +5,13 @@
   "type": "module",
   "workspaces": [
     "packages/pocket_ui",
+    "packages/pocket_looseleaf",
     "packages/pocket_tftc",
     "packages/pocket_vn",
     "packages/pocket_spine",
     "packages/pocket_live2d",
-    "packages/pocket_diagnostics"
+    "packages/pocket_diagnostics",
+    "packages/pocket_arc"
   ],
   "dependencies": {
     "@pocket/ui": "0.1.0",

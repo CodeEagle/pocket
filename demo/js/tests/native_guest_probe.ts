@@ -387,16 +387,22 @@ assert.match(textOf(pointerPlusFrame), /Incremented in JS/, "native pointer +1 d
 const lazyResponses = runProbe([
   ...bootstrap(),
   event("demo.navigate", { route: "gallery" }),
-  { op: "frame", deltaMs: 16 },
+  ...frameCommands(20),
   event("demo.toggleLazy"),
-  { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "down", id: 0, x: 180, y: 500 }),
-  { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "move", id: 0, x: 180, y: 180 }),
-  { op: "frame", deltaMs: 16 },
-  event("input.pointer", { phase: "up", id: 0, x: 180, y: 180 }),
-  { op: "frame", deltaMs: 16 },
-  { op: "frame", deltaMs: 16 },
+  ...frameCommands(2),
+  // New component catalog cards can move Lazy farther down the page. Scroll
+  // with real pointer moves over a bounded viewport rather than assuming one
+  // drag always reveals a fixed row.
+  ...Array.from({ length: 6 }, () => [
+    event("input.pointer", { phase: "down", id: 0, x: 180, y: 500 }),
+    ...frameCommands(1),
+    ...Array.from({ length: 10 }, (_, index) => [
+      event("input.pointer", { phase: "move", id: 0, x: 180, y: 500 - 32 * (index + 1) }),
+      ...frameCommands(1),
+    ]).flat(),
+    event("input.pointer", { phase: "up", id: 0, x: 180, y: 180 }),
+    ...frameCommands(3),
+  ]).flat(),
   { op: "quit" },
 ]);
 assert.ok(

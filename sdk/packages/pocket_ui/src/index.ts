@@ -16,6 +16,7 @@ export * from "./updates.ts";
 export * from "./flutter-widgets.tsx";
 export * from "./inline-text.tsx";
 export * from "./apple.tsx";
+export * from "./bytes.ts";
 
 // Preload compositor composition with the public UI entry so the pinned
 // compiler collects its class literals before bundling subpath imports.

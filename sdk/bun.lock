@@ -20,9 +20,27 @@
         "@abandonware/noble": "1.9.2-26",
       },
     },
+    "packages/pocket_arc": {
+      "name": "@pocket/arc",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pocket/ui": "0.1.0",
+      },
+    },
+    "packages/pocket_diagnostics": {
+      "name": "@pocket/diagnostics",
+      "version": "0.1.0",
+    },
     "packages/pocket_live2d": {
       "name": "@pocket/live2d",
       "version": "0.1.0",
+    },
+    "packages/pocket_looseleaf": {
+      "name": "@pocket/looseleaf",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pocket/ui": "0.1.0",
+      },
     },
     "packages/pocket_spine": {
       "name": "@pocket/spine",
@@ -184,7 +202,13 @@
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
 
+    "@pocket/arc": ["@pocket/arc@workspace:packages/pocket_arc"],
+
+    "@pocket/diagnostics": ["@pocket/diagnostics@workspace:packages/pocket_diagnostics"],
+
     "@pocket/live2d": ["@pocket/live2d@workspace:packages/pocket_live2d"],
+
+    "@pocket/looseleaf": ["@pocket/looseleaf@workspace:packages/pocket_looseleaf"],
 
     "@pocket/spine": ["@pocket/spine@workspace:packages/pocket_spine"],
 

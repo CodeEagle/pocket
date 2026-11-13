@@ -1,0 +1,26 @@
+{
+  "name": "@pocket/arc",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "description": "Calm-motion semantic-token UI component library for PocketJS, faithful to kuratlielia/arc-library (@uiarc).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens": "./src/tokens.ts",
+    "./motion": "./src/motion.ts",
+    "./surfaces": "./src/surfaces.tsx",
+    "./controls": "./src/controls.tsx",
+    "./navigation": "./src/navigation.tsx",
+    "./data": "./src/data.tsx",
+    "./overlays": "./src/overlays.tsx"
+  },
+  "scripts": {
+    "test": "bun test test"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@pocket/ui": "0.1.0"
+  }
+}

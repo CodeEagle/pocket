@@ -22,6 +22,7 @@ export type Route =
   | "hardware"
   | "video"
   | "apple"
+  | "looseleaf"
   | "settings";
 
 export type AccentColor = "blue" | "violet" | "teal" | "rose";

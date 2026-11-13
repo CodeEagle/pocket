@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -126,8 +126,8 @@ test("plan uses only fixed build/run argv and the trusted consumer roots", async
     expect(plan.build.command).toEqual(["bun", "run", "build:system"]);
     expect(plan.run.command).toEqual(["flutter", "run", "--machine", "-d", "ios-sim-1", "--no-pub"]);
     expect(calls).toEqual([["flutter", "devices", "--machine"]]);
-    expect(plan.projectRoot).toBe(fixture.js);
-    expect(plan.flutterRoot).toBe(fixture.root);
+    expect(plan.projectRoot).toBe(realpathSync(fixture.js));
+    expect(plan.flutterRoot).toBe(realpathSync(fixture.root));
   } finally {
     await manager.dispose();
     rmSync(fixture.root, { recursive: true, force: true });

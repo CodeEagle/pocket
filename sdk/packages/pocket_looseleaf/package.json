@@ -1,0 +1,26 @@
+{
+  "name": "@pocket/looseleaf",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "description": "Hand-drawn paper, felt-tip, marker and tape UI component library for PocketJS (shadcn/ui-compatible).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens": "./src/tokens.ts",
+    "./surfaces": "./src/surfaces.tsx",
+    "./marks": "./src/marks.tsx",
+    "./controls": "./src/controls.tsx",
+    "./navigation": "./src/navigation.tsx",
+    "./data": "./src/data.tsx",
+    "./overlays": "./src/overlays.tsx"
+  },
+  "scripts": {
+    "test": "bun test test"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@pocket/ui": "0.1.0"
+  }
+}

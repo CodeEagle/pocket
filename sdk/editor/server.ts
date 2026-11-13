@@ -345,7 +345,8 @@ const ignoredProjectInputDirectories = new Set([
 ]);
 
 function isAllowedExternalSdkLink(relativePath: string): boolean {
-  return relativePath.replaceAll("\\", "/") === "vendor/pocket-ui";
+  const normalized = relativePath.replaceAll("\\", "/");
+  return normalized === "vendor/pocket-ui" || normalized === "vendor/pocket-looseleaf" || normalized === "vendor/pocket-arc";
 }
 
 type SafeProjectFileOptions = {
@@ -2193,6 +2194,7 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const updatePackageVersionSource = explicitPackageVersion ? "explicit" : inferredPackageVersion ? "flutter-asset" : "project-first-publish";
   await Promise.all([mkdir(workspace.projects, { recursive: true }), mkdir(workspace.builds, { recursive: true }), mkdir(workspace.updates, { recursive: true }), mkdir(workspace.keys, { recursive: true }), mkdir(workspace.states, { recursive: true })]);
   const states = new Map<string, EditorState>();
+  const stateMtimes = new Map<string, number>();
   const stateLoads = new Map<string, Promise<EditorState>>();
   const projectWrites = new Set<string>();
   const backupTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -2201,14 +2203,26 @@ export async function startEditor(options: StartEditorOptions = {}): Promise<Edi
   const runner = options.buildRunner ?? realBuild;
   if (!appIdPattern.test(updateHostVersion)) throw new Error("Editor update host version is invalid");
   if (updatePackageVersion !== undefined && !appIdPattern.test(updatePackageVersion)) throw new Error("Editor update package version is invalid");
+  const readDiskStateMtime = (id: string): number | undefined => {
+    try {
+      return lstatSync(join(workspace.states, `${id}.json`)).mtimeMs;
+    } catch {
+      return undefined;
+    }
+  };
   const getState = async (id: string): Promise<EditorState> => {
     const cached = states.get(id);
-    if (cached) return cached;
+    const diskMtime = readDiskStateMtime(id);
+    if (cached && (cached.busy || diskMtime === undefined || diskMtime === stateMtimes.get(id))) {
+      return cached;
+    }
     let loading = stateLoads.get(id);
     if (!loading) {
       loading = loadState(workspace, id).then(async (loaded) => {
         const state = await bindCatalogProjectState(workspace, id, loaded);
         states.set(id, state);
+        const latestMtime = readDiskStateMtime(id);
+        if (latestMtime !== undefined) stateMtimes.set(id, latestMtime);
         armNovelBackup(id, state);
         return state;
       }).finally(() => stateLoads.delete(id));

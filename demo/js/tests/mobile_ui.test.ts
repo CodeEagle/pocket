@@ -242,6 +242,7 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   const sdkRoot = join(root, "../../sdk");
   const appSource = readFileSync(join(root, "app.tsx"), "utf8");
   const applePageSource = readFileSync(join(root, "apple-page.tsx"), "utf8");
+  const looseleafPageSource = readFileSync(join(root, "looseleaf-page.tsx"), "utf8");
   const mobileSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/mobile.tsx"), "utf8");
   const videoSource = readFileSync(join(sdkRoot, "packages/pocket_ui/src/video.tsx"), "utf8");
   const pageSource = readFileSync(join(root, "mobile-pages.tsx"), "utf8");
@@ -257,6 +258,10 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(appSource, /Open Apple Glass/);
   assert.match(appSource, /route === "apple"/);
   assert.match(applePageSource, /AppleGlassNavigationBar/);
+  assert.match(appSource, /Open Looseleaf/);
+  assert.match(appSource, /route === "looseleaf"/);
+  assert.match(looseleafPageSource, /@pocket\/looseleaf/);
+  assert.match(looseleafPageSource, /LooseleafNavigationBar/);
   assert.doesNotMatch(appSource, /LiquidGlassPage|route === "glass"|route: "glass"|label="Liquid Glass"/);
   assert.doesNotMatch(pageSource, /LiquidGlassPage|Liquid Glass|buildLiquidGlassRecipe|glassShapes|GlassSurface/);
   for (const label of [
@@ -308,13 +313,13 @@ test("source-backed mobile controls, transitions, and contracts", () => {
   assert.match(appSource, /setRouteTransition/);
   assert.match(appSource, /onFrame\(\(\) =>/);
   assert.match(displaySource, /ui\?: \{ __viewport/);
-  assert.match(appSource, /visible=\{isPrimaryRoute\(state\(\)\.route\)\}/);
+  assert.match(appSource, /bottomBar=\{isPrimaryRoute\(route\) \? \(/);
   assert.match(appSource, /items=\{showcaseTabs\}/);
   assert.doesNotMatch(appSource, /width: wide\(\) \? 640/);
   assert.doesNotMatch(appSource, /badge="JS-owned"/);
   assert.match(appSource, /contentWidth/);
   assert.match(appSource, /mobileDark/);
-  assert.match(appSource, /flex-1 flex-col h-full overflow-hidden/);
+  assert.match(appSource, /<SafeAreaScaffold/);
   assert.match(uiSource, /export const TabBar = NavigationBar/);
   assert.match(appSource, /createDisplayGeometry/);
   assert.match(displaySource, /display\.viewport/);

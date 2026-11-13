@@ -125,6 +125,11 @@ test("export_web_sdk creates a Flutter-free toolchain repo with Editor and the Q
   expect(manifest.version).toBe(SDK_VERSION);
   expect(manifest.workspaces).toContain("packages/pocket_tftc");
   expect(manifest.workspaces).toContain("packages/pocket_ui");
+  for (const name of ["pocket_looseleaf", "pocket_arc"]) {
+    expect(manifest.workspaces).toContain(`packages/${name}`);
+    expect(existsSync(join(output, `packages/${name}/src/index.ts`))).toBe(true);
+    expect(existsSync(join(output, `packages/${name}/test`))).toBe(false);
+  }
   expect(manifest.workspaces).toContain("packages/pocket_spine");
   expect(manifest.workspaces).toContain("packages/pocket_live2d");
   expect(manifest.dependencies?.["@pocket/spine"]).toBe("0.1.0");

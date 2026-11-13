@@ -95,6 +95,7 @@ import { installShowcaseSystem } from "./system.ts";
 import { showcaseUpdateState } from "./update-state.ts";
 import { SettingsPage, readAppearance, storedAppearance } from "./settings.tsx";
 import { ApplePage } from "./apple-page.tsx";
+import { LooseleafPage } from "./looseleaf-page.tsx";
 import { computeTransitionDescriptor, createDisplayGeometry } from "@pocket/ui";
 import {
   isPrimaryRoute,
@@ -200,7 +201,7 @@ function paramsOf(message: BridgeMessage): Record<string, unknown> {
 function routeOf(value: unknown): Route | undefined {
   const route = String(value ?? "");
   // `gallery` remains the old probe's compatibility spelling for UI.
-  if (route === "settings" || route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple") return route;
+  if (route === "settings" || route === "home" || route === "gallery" || route === "about" || route === "bytecode" || route === "updates" || route === "plugins" || route === "stress" || route === "performance" || route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple" || route === "looseleaf") return route;
   if (route === "ui") return "gallery";
   return undefined;
 }
@@ -953,7 +954,7 @@ function App() {
   });
 
   const isShowcaseRoute = (route: Route): boolean =>
-    route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple";
+    route === "mobile" || route === "transitions" || route === "hardware" || route === "video" || route === "apple" || route === "looseleaf";
   const transitionDescriptor = () => {
     const transition = routeTransition();
     const width = Math.max(1, contentPaneWidth());
@@ -1198,6 +1199,8 @@ function App() {
         return <VideoPage host={host} platform={platform} onNavigate={navigate} />;
       case "apple":
         return <ApplePage />;
+      case "looseleaf":
+        return <LooseleafPage />;
       default:
         return <HostPages route={route} host={host} state={state} dispatch={dispatch} requestCapability={requestCapability} runStress={runStress} performance={performance} recordingStatus={recordingStatus} />;
     }
@@ -1212,6 +1215,7 @@ function App() {
     : route === "hardware" ? "Hardware"
     : route === "video" ? "Video Lab"
     : route === "apple" ? "Apple Glass"
+    : route === "looseleaf" ? "Looseleaf"
     : hostTabs.find((tab) => tab.id === route)?.label ?? "Frame diagnostics";
 
   const renderRouteAppBar = (route: Route): JSX.Element => (
@@ -1674,6 +1678,12 @@ function GalleryPage(props: {
         detail="Apple-style controls and navigation, with a calm backdrop to explore."
       >
         <MobileButton label="Open Apple Glass" onPress={() => props.dispatch({ type: "navigate", route: "apple" })} />
+      </MobileCard>
+      <MobileCard
+        title="Looseleaf Paper & Ink"
+        detail="Standalone @pocket/looseleaf package: hand-drawn paper, felt-tip, marker and masking tape UI."
+      >
+        <MobileButton label="Open Looseleaf" onPress={() => props.dispatch({ type: "navigate", route: "looseleaf" })} />
       </MobileCard>
       <View class="flex-row flex-wrap gap-3">
         <For each={componentCards}>
