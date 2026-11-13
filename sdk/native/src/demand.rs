@@ -601,6 +601,43 @@ mod tests {
         }
     }
 
+    /// A continuation (here the work that follows a large host.response) that
+    /// exceeds the per-turn budget is aborted inside a Promise job. That used to
+    /// leave every job "successful" and the frame clean, so the guest stalled
+    /// with no error anywhere. The aborted turn must now fail the frame.
+    #[test]
+    fn async_continuation_aborted_by_turn_budget_fails_the_frame() {
+        unsafe {
+            let host = pocket_create(64.0, 64.0);
+            let source = CString::new(
+                r#"let release;
+                globalThis.frame = () => {};
+                globalThis.__pocketWorkState = () => ({version:1,continuous:false,
+                  simulationHz:60,framesUntilTimer:null});
+                globalThis.__pocketSkipIdleFrames = (n) => n;
+                new Promise((resolve) => { release = resolve; }).then(() => {
+                  const start = Date.now();
+                  let spins = 0;
+                  while (Date.now() - start < 2000) { spins += 1; }
+                  globalThis.finished = true;
+                });
+                globalThis.__pocketEvent = () => { release(); };"#,
+            )
+            .unwrap();
+            assert_eq!(pocket_eval(host, source.as_ptr()), 0);
+            frame(host, 1000.0 / 60.0);
+            let message = CString::new(r#"{"type":"event","name":"go"}"#).unwrap();
+            assert_eq!(pocket_send(host, message.as_ptr()), 0);
+            let output = pocket_frame(host, 1000.0 / 60.0);
+            assert!(!output.is_null());
+            let error = crate::pocket_last_error(host);
+            assert!(!error.is_null());
+            let error = CStr::from_ptr(error).to_string_lossy();
+            assert!(error.contains("interrupted by budget"), "{error}");
+            pocket_destroy(host);
+        }
+    }
+
     unsafe fn promise_state(host: *mut HostState) -> (u32, u32) {
         host.as_ref()
             .unwrap()

@@ -264,6 +264,15 @@ unsafe fn frame_response_mode(
     if pointer.is_null() {
         return ProbeResponse::Json(native_error(handle, "pocket_frame"));
     }
+    // A failed frame (guest exception, turn budget interrupt, ...) still returns
+    // a valid empty frame; the failure is only reported through
+    // `pocket_last_error`, which the Flutter FFI runtime checks after every
+    // frame. Report it like the FFI runtime does instead of masking it as
+    // `{"ok":true,"frame":<empty>}`.
+    let error_pointer = pocket_last_error(handle.cast());
+    if !error_pointer.is_null() && *error_pointer != 0 {
+        return ProbeResponse::Json(native_error(handle, "pocket_frame"));
+    }
 
     let bytes = CStr::from_ptr(pointer).to_bytes();
     if bytes.len() > MAX_RAW_FRAME_BYTES {
