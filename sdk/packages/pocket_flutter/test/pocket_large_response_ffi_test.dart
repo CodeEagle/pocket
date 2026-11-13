@@ -15,11 +15,19 @@ Map<String, dynamic> _response(String id, int size) => <String, dynamic>{
   },
 };
 
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final libraryPath = Platform.environment['POCKET_NATIVE_LIBRARY'];
   final skip = libraryPath == null || libraryPath.isEmpty
       ? 'POCKET_NATIVE_LIBRARY is required'
       : null;
+  requireReal(skip);
 
   test('back-to-back large host.response messages are all delivered', () {
     final runtime = FfiPocketRuntime.open(width: 64, height: 64);

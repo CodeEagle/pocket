@@ -8,6 +8,8 @@ Tick each item with the date, the Mac model, the commit and the numbers.
 Prerequisites: Xcode, Flutter (the SDK's pinned channel), `bun`, `cargo` with the `aarch64-apple-darwin` target.
 Build the guest first: `cd studio/js && bun install && bun run build`.
 
+- [ ] Linux gate: `cd studio && POCKET_REQUIRE_REAL=1 flutter test --no-pub` reports 0 skipped (`POCKET_REQUIRE_REAL=1` turns a missing native library, bun or fixture into a failure).
+
 ## 1. Launcher end to end
 - [ ] `bun sdk/pocket.ts editor --pocket <project>` starts `flutter run -d macos`, writes `<workspace>/pocket-studio-host.config.json`, attaches to or starts the service, opens the Studio window.
 - [ ] Re-running with the service already up attaches (no second service); closing the window stops a service the host started.
@@ -35,7 +37,9 @@ Build the guest first: `cd studio/js && bun install && bun run build`.
 - [ ] `POCKET_STUDIO_UPDATE_CHANNEL=stable` path against a stable slot.
 
 ## 6. Entitlements and codesign
-- [ ] `studio/macos/Runner/*.entitlements`: the app runs without the App Sandbox (it spawns `bun` and reads the trusted workspace). Decide the distribution model (developer tool outside the Mac App Store) and sign with a Developer ID, hardened runtime; check `com.apple.security.cs.allow-jit` is NOT needed (QuickJS bytecode, no JIT) and that loopback networking works.
+- [ ] `studio/macos/Runner/*.entitlements`: the app runs without the App Sandbox (it spawns `bun` and reads the trusted workspace). With the sandbox off, the `com.apple.security.network.*` entitlements are inert (they only apply inside the sandbox); loopback networking is not governed by them. Decide the distribution model (developer tool outside the Mac App Store) and sign with a Developer ID, hardened runtime.
+- [ ] `com.apple.security.cs.allow-jit`: the Release entitlements already omit it (QuickJS bytecode, no JIT); only `DebugProfile.entitlements` grants it. Verify the Release build still starts with hardened runtime and no JIT entitlement.
+- [ ] Accepted residual risk (developer tool): a QuickJS memory-safety bug in the preview child would run with the user's privileges, because the sandbox is off. This is accepted for a developer tool distributed outside the Mac App Store; revisit if distribution changes.
 - [ ] Notarisation and Gatekeeper first launch; `bun` located through the configured path, not `PATH` of the launching shell.
 - [ ] Release build (`flutter build macos --release`) links the static native archive (arm64 only).
 

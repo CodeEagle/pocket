@@ -6,7 +6,7 @@ macOS 上的薄 Flutter 宿主里；后端仍是 `sdk/editor` 的 Bun 服务。`
 > 网页 Studio（`bun pocket.ts editor <项目>`）对 Pocket Studio 已覆盖的功能现为 **legacy**；视觉小说编辑器、微信预览、Noble
 > 蓝牙和 Codex 仍只在网页 Studio（负责人决定）。macOS 验收通过后 `--pocket` 将成为默认入口。
 
-- [`js/`](js/)：Studio guest（`app.tsx`、`src/studio-client.ts` 能力客户端、项目列表、文件树、只读查看器）。
+- [`js/`](js/)：Studio guest（`app.tsx`、`src/studio-client.ts` 能力客户端）。功能：项目列表、文件树、CodeView 编辑器（多标签、保存、查找）、控制台/构建、预览、发布、产物、版本、设置、Studio 自更新、快速打开（Cmd+P）与快捷键。
 - [`lib/main.dart`](lib/main.dart)：薄宿主（≤ 100 行），注册 `PocketStudioPlugin` 与剪贴板插件，仅向
   `dev.pocket.studio` 授予 `studio.*` 与剪贴板权限，预览子应用 `dev.pocket.studio.preview` 没有任何授权。
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：分层、冻结的 `studio.*` 能力表、权限模型、路径脱敏、服务生命周期。
@@ -60,6 +60,7 @@ guest 看不到绝对路径、签名密钥、socket 或 CSRF 令牌。宿主会�
 ```sh
 export POCKET_NATIVE_LIBRARY=/绝对路径/pocket/sdk/native/target/debug/libpocket_flutter.so
 export POCKET_SOURCE_BUILD=1 TMPDIR=/tmp
+export POCKET_REQUIRE_REAL=1   # 缺少原生库、bun 或夹具时直接失败，而不是跳过（CI/发布前必须开启）
 cd studio/js && bash scripts/test_guest.sh        # 单元、构建字节码、探针上的 guest 测试（含键盘与性能剖析）
 cd .. && flutter analyze && flutter test --no-pub  # 真实库 + 真实服务的 M1-M7 退出测试（含录制/回放回归）
 ```
@@ -71,7 +72,7 @@ cd .. && flutter analyze && flutter test --no-pub  # 真实库 + 真实服务的
 
 * **“bytecode package requires host-native fonts”**：字体度量必须在录制的第一个事务之前安装；`PocketView` 已在 compositor 配置前同步字体（M7 修复）。自带宿主请先调用 `syncPocketHostFonts`。
 * **Guest 单轮 250 ms 预算**：探针返回 `pocket_probe frame failed`。大文件读写已在 `studio-client.ts` 切片；新增重计算请用 `yieldTurn` 分片。
-* **`flutter test` 被跳过**：未设置 `POCKET_NATIVE_LIBRARY`，或找不到 `bun`（用 `POCKET_BUN` 指定）。
+* **`flutter test` 被跳过**：未设置 `POCKET_NATIVE_LIBRARY`，或找不到 `bun`（用 `POCKET_BUN` 指定）。设置 `POCKET_REQUIRE_REAL=1` 后同样的条件会变成失败，`flutter test` 报告 0 skipped。
 * **`bun install` 之后才看到 SDK 改动**：`studio/js/node_modules/@pocket/ui` 是拷贝；修改 `sdk/packages/pocket_ui` 后在 `studio/js` 重新 `bun install`。
 * **macOS 上 `--pocket` 报错或窗口空白**：先 `cd studio/js && bun run build`，确认 `studio/assets` 有 `app.qjbc`；Cmd+W/Cmd+P 被系统菜单吞掉等问题见 `docs/RELEASE_CHECKLIST.md`。
 * **服务端口占用**：`--port=N` 另选端口；宿主会附着到已运行的编辑器服务。

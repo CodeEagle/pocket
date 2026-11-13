@@ -14,6 +14,13 @@ import 'package:pocket_studio_app/main.dart';
 /// PocketView raw text input (hardware key edges and IME deltas), undo with Meta+Z, save with Meta+S, and
 /// compare the file on disk. Everything is real: native runtime, Studio bytecode, host grants, editor
 /// service. The macOS IME checklist and profile-build frame budget are NOT covered here (deferred).
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = null;
@@ -25,6 +32,7 @@ void main() {
       : !File(bun).existsSync()
       ? 'bun executable not found (set POCKET_BUN)'
       : false;
+  requireReal(skip);
 
   late Directory work;
   late Directory project;

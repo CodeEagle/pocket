@@ -46,7 +46,7 @@ All calls are `request` capabilities except the two `stream` rows. Every call ne
 | `studio.fs.upload.commit` | `{project, uploadId}` | `{path, bytes, sha256, revision}` | `POST …/uploads/:uploadId/commit` | write |
 | `studio.fs.upload.abort` | `{project, uploadId}` | `{uploadId, aborted}` | `DELETE …/uploads/:uploadId` | write |
 | `studio.fs.watch` (stream) | `{project}` | batches `{events: WatchEvent[]}` | `GET …/watch` (SSE) | read |
-| `studio.build.start` | `{project}` | status (202) | `POST …/build` | build |
+| `studio.build.start` | `{project}` | flat status object (202; the service `{status:{…}}` envelope is unwrapped) | `POST …/build` | build |
 | `studio.build.cancel` | `{project}` | `{cancelled, pending?, status}` | `POST …/build/cancel` | build |
 | `studio.build.status` | `{project}` | `EditorStatus` (newest log lines within budget) | `GET …/status` | read |
 | `studio.build.events` (stream) | `{project}` | batches `{events: BuildEvent[]}` | `GET …/build/events` (SSE) | read |
@@ -133,6 +133,13 @@ Applied to every response, error message, and stream event (`StudioPathScrubber`
    `<redacted-key>`. Public keys (`publicKey`, `keyId`) are not secrets and pass. Tests: `studio_plugin_test.dart` (every
    publish route, errors and artifacts) and `real_service_test.dart` (real publish; no field of the real key file appears in
    any result).
+7. Exemptions (by design): `studio.fs.read` `content` and `studio.fs.readChunk` `data` (base64) are the project file's bytes
+   returned verbatim; they are not scrubbed, so a file that itself contains a path shows that path. Scrubbing applies to
+   the envelope and error text only. The editor workspace directory is unreachable through the fs routes: when the
+   workspace lives inside the project (default `<project>/.pocket-editor`), a fs path that resolves into it (lexically, or
+   under the workspace's realpath) is rejected with `path is inside the editor workspace` (HTTP 400). Dot-prefixed path
+   segments are rejected separately (`hidden (dot-prefixed) path segments are not allowed`, HTTP 400), so the default
+   workspace is also unreachable by that rule. Symlinks inside the project are checked against the project root.
 
 Project-relative paths (`src/tmp/x.ts`) and loopback URLs are unaffected. Rule 3 is a safety net with a fixed
 list of system top-level directories; it is not a general path parser. Tests: `sdk/packages/pocket_studio/test`.

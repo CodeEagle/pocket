@@ -64,8 +64,16 @@ __pocketEvent.__binaryCapable = true;
 JSON.parse = JSON.stringify = () => { throw Error('JSON reached render transport'); };
 ''';
 
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final nativeLibrary = Platform.environment['POCKET_NATIVE_LIBRARY'];
+  requireReal(nativeLibrary == null ? 'POCKET_NATIVE_LIBRARY is not set' : null);
 
   testWidgets(
     'real JS move/delete across retained canvas blocks clears old pixels',

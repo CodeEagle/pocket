@@ -29,6 +29,13 @@ import 'package:pocket_studio_app/main.dart';
 /// checkpoint list in `fixtures/journey_checkpoints.json`. Service timestamps, build ids, hashes, ports and temp
 /// paths are normalised away (only structural facts remain), so the fixture is deterministic across runs and
 /// machines and fails when a UI change alters what the journey achieves. Regenerate with STUDIO_UPDATE_FIXTURES=1.
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = null;
@@ -40,6 +47,7 @@ void main() {
       : !File(bun).existsSync()
       ? 'bun executable not found (set POCKET_BUN)'
       : false;
+  requireReal(skip);
 
   late Directory work;
   late Directory project;

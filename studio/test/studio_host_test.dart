@@ -18,6 +18,13 @@ import 'package:pocket_studio_app/main.dart';
 /// real editor service started by `PocketStudioService` with `--project-root`
 /// pointing at the demo's JS project. The guest can reach the service only
 /// through studio.* capabilities.
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = null;
@@ -32,6 +39,7 @@ void main() {
       : !Directory(projectRoot).existsSync()
       ? 'sample project is missing'
       : false;
+  requireReal(skip);
 
   late Directory work;
   late PocketStudioConfig config;

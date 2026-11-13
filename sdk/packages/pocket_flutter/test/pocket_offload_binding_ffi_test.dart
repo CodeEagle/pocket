@@ -38,8 +38,16 @@ final class _LifecycleProvider implements PocketOffloadProvider {
   }
 }
 
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final libraryPath = Platform.environment['POCKET_NATIVE_LIBRARY'];
+  requireReal(libraryPath == null ? 'POCKET_NATIVE_LIBRARY is not set' : null);
   test(
     'offload binding configures before use and closes its provider before native teardown',
     () {

@@ -22,6 +22,13 @@ import 'package:pocket_studio_app/main.dart';
 /// returns to the view. Source edits are written through `studio.fs.write` like an external editor (the
 /// code editor's IME path is covered by studio_code_editor_test.dart); open, build, publish, check and apply
 /// are all taps.
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = null;
@@ -33,6 +40,7 @@ void main() {
       : !File(bun).existsSync()
       ? 'bun executable not found (set POCKET_BUN)'
       : false;
+  requireReal(skip);
 
   late Directory work;
   late Directory ownProject; // temp copy of studio/js

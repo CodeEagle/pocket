@@ -27,6 +27,13 @@ import 'package:pocket_studio_app/main.dart';
 /// service's version journal read over HTTP, the client's activated package (version/build), the client's
 /// own frame text and an input-driven frame change, and that no key material or absolute path ever
 /// crossed to the guest.
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = null;
@@ -38,6 +45,7 @@ void main() {
       : !File(bun).existsSync()
       ? 'bun executable not found (set POCKET_BUN)'
       : false;
+  requireReal(skip);
 
   late Directory work;
   late Directory project;

@@ -108,12 +108,20 @@ Future<_Rig> _mount(WidgetTester tester, String dir, int capacity) async {
   return rig;
 }
 
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final dir = Platform.environment['POCKET_CODE_VIEW_FIXTURE_DIR'];
   final lib = Platform.environment['POCKET_NATIVE_LIBRARY'];
   final skip = (dir == null || lib == null)
       ? 'Set POCKET_CODE_VIEW_FIXTURE_DIR (bun packages/pocket_ui/test/code_view_flutter_fixture.ts <dir>) and POCKET_NATIVE_LIBRARY.'
       : null;
+  requireReal(skip);
 
   testWidgets('hardware keys and IME deltas edit the guest CodeView', (tester) async {
     final rig = await _mount(tester, dir!, 256);

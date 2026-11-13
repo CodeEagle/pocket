@@ -19,6 +19,13 @@ import 'package:pocket_studio_app/main.dart';
 /// input events (pointer taps, the Flutter text overlay) and its own auto-build setting; the test never
 /// calls a studio.* capability. Observed facts: the file on disk, the service build state, the
 /// preview child's session (active build) and its frame digests.
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = null;
@@ -30,6 +37,7 @@ void main() {
       : !File(bun).existsSync()
       ? 'bun executable not found (set POCKET_BUN)'
       : false;
+  requireReal(skip);
   final shotDir = Platform.environment['STUDIO_SHOT_DIR'];
 
   late Directory work;

@@ -177,11 +177,19 @@ Map<String, dynamic> _opSnapshot(PocketOp op) {
   return result;
 }
 
+/// POCKET_REQUIRE_REAL=1 turns a missing prerequisite into a failure instead of a skip.
+void requireReal(Object? skipReason) {
+  if (skipReason != null && skipReason != false && Platform.environment['POCKET_REQUIRE_REAL'] == '1') {
+    fail('POCKET_REQUIRE_REAL=1: $skipReason');
+  }
+}
+
 void main() {
   final libraryPath = Platform.environment['POCKET_NATIVE_LIBRARY'];
   final skipWithoutNative = libraryPath == null
       ? 'Set POCKET_NATIVE_LIBRARY to a built Pocket native dylib/so.'
       : false;
+  requireReal(skipWithoutNative);
 
   test(
     'real native record/replay captures clock, host, lifecycle, resize and auxiliary lanes',
