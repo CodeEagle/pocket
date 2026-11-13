@@ -262,7 +262,7 @@ jobs:
     name: flutter-sdk-and-demo
     runs-on: ubuntu-24.04
     needs: js-sdk-and-guest
-    if: ${{ always() && needs.js-sdk-and-guest.result != 'cancelled' }}
+    if: ${{ !cancelled() && needs.js-sdk-and-guest.result != 'cancelled' }}
     steps:
       - uses: actions/checkout@v4
 
