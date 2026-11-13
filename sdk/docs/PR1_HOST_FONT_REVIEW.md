@@ -96,3 +96,14 @@ view and samples at most three real Guest frames for motion, checking state
 retention and non-decreasing x on each frame, then requiring full exit. This
 accounts for the event/transform commit boundary without removing the motion
 assertion. The tracked root bytecode/metadata were refreshed from this build.
+
+## Standalone upgrade release gate
+
+The standalone upgrade lifecycle fixture now copies the actual editor runtime
+tree, excluding tests/caches, as `export_web_sdk.ts` does. Its controlled server
+entry still exercises the real detached `editor_service.mjs` upgrade and
+rollback flow. This removes a manual import list that omitted the new
+`update_endpoint.ts`; the production exporter already included that module.
+The release command passed all 24 tests and 138 assertions on macOS with
+Playwright Chromium and Bun 1.4.4. The same group is now included in Linux CI
+before packaging. SDK version 0.1.14 supersedes the unpublished 0.1.13 candidate.

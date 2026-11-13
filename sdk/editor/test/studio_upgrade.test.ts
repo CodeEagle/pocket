@@ -200,7 +200,7 @@ function createStandaloneSdkTree(
     brokenToolsAbi?: boolean;
     upstreamRevision?: string;
     bytecodeAbi?: string;
-    extraPackageFiles?: Record<string, string>;
+    extraPackageFiles?: Record<string, string | Buffer>;
   } = {},
 ): {
   archiveBytes: Buffer;
@@ -1016,10 +1016,11 @@ function populateRealStandaloneScripts(
     upstreamRevision?: string;
     bytecodeAbi?: string;
     failOnVersion?: string;
-    extraPackageFiles?: Record<string, string>;
+    extraPackageFiles?: Record<string, string | Buffer>;
   } = {},
 ) {
   const repoScriptsDir = resolve(import.meta.dir, "../../scripts");
+  const repoEditorDir = resolve(import.meta.dir, "..");
   const repoNodeModules = resolve(import.meta.dir, "../../node_modules");
   const upstreamRevision = options.upstreamRevision ?? UPSTREAM_REVISION;
   const bytecodeAbi = options.bytecodeAbi ?? BYTECODE_ABI;
@@ -1029,10 +1030,32 @@ function populateRealStandaloneScripts(
     .replace(/export const UPSTREAM_REVISION = ['"][^'"]+['"];/, `export const UPSTREAM_REVISION = '${upstreamRevision}';`)
     .replace(/export const BYTECODE_ABI = ['"][^'"]+['"];/, `export const BYTECODE_ABI = '${bytecodeAbi}';`);
 
+  // Mirror export_web_sdk's editor source copy (which removes editor/test)
+  // instead of maintaining a second hand-written list of CLI runtime imports.
+  // The test's minimal server entry is overlaid below to keep lifecycle
+  // behavior controlled while editor_service.mjs uses the real editor helpers.
+  const editorRuntimeFiles: Record<string, Buffer> = {};
+  const ignoredEditorPathParts = new Set(["test", "node_modules", "target", ".cache", ".pocket-build", ".git"]);
+  const collectEditorRuntimeFiles = (currentDir: string): void => {
+    const entries = readdirSync(currentDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry.name);
+      const relPath = relative(repoEditorDir, fullPath).replaceAll("\\", "/");
+      if (relPath.split("/").some((part) => ignoredEditorPathParts.has(part))) continue;
+      if (entry.isDirectory()) {
+        collectEditorRuntimeFiles(fullPath);
+      } else if (entry.isFile()) {
+        editorRuntimeFiles[`editor/${relPath}`] = readFileSync(fullPath);
+      }
+    }
+  };
+  collectEditorRuntimeFiles(repoEditorDir);
+
   const archiveInfo = createStandaloneSdkTree(targetSdkRoot, version, {
     upstreamRevision,
     bytecodeAbi,
     extraPackageFiles: {
+      ...editorRuntimeFiles,
       "scripts/editor_service.mjs": readFileSync(join(repoScriptsDir, "editor_service.mjs"), "utf8"),
       "scripts/studio_upgrade.mjs": readFileSync(join(repoScriptsDir, "studio_upgrade.mjs"), "utf8"),
       "scripts/prebuilt_tools.mjs": prebuiltSource,

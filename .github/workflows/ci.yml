@@ -196,6 +196,12 @@ jobs:
             editor/test/preview_text_transform.test.ts \
             editor/test/preview_recording_host_fonts.test.ts
 
+      - name: Verify Studio upgrade lifecycle before packaging
+        working-directory: sdk
+        env:
+          POCKET_SOURCE_BUILD: "1"
+        run: npm exec --yes --package=bun@1.4.4 -- bun test --timeout 60000 editor/test/studio_upgrade.test.ts scripts/tests/editor_service.test.ts
+
       - name: Run Showcase guest compilation, ablation, and native probe suites
         env:
           POCKET_WEB_RUNTIME: ${{ github.workspace }}/sdk/.pocket-build/web-engine/pocket-web.js
