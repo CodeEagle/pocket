@@ -155,3 +155,13 @@ phase using the existing lifecycle's `exited` fact. Return to the existing
 step-admission/stop guard while running; retain Pulse-based waiting after exit
 for pending native completion. Reuse the pinned callback boundary and existing
 lifecycle instead of introducing another stop state or polling loop.
+
+The pinned runner has a separate fault-retention loop that never returns to
+step admission. During replay stop, inspect the existing C runner failure
+flag and stop that faulted runner through its existing API; preserve its
+error and replay failure instead of treating it as a successful stop. The
+regression retains the original first-step/zero-turn boundaries and adds a
+real recorded idle turn with its stop pulse already consumed. Removing the
+running-phase guard reproduces the timeout; restoring it permits exit. A
+separate deliberately mismatched admission proves faulted shutdown terminates
+while the original replay error remains observable.
