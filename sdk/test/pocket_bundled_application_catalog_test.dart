@@ -477,7 +477,19 @@ void main() {
         contains('ui.compositor-surfaces'),
       );
       expect(rootGuest.config.pluginFactories.first, same(lanternFactory));
-      expect(rootGuest.config.pluginFactories, hasLength(4));
+      expect(
+        rootGuest.config.pluginFactories,
+        hasLength(5),
+        reason:
+            'SystemUI adds recording, diagnostics, runtime, and platform-proxy factories to the selected root policy.',
+      );
+      expect(
+        rootGuest.config.pluginFactories
+            .last(PocketViewController())
+            .descriptor
+            .id,
+        'pocket.system.platform-proxy',
+      );
 
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();

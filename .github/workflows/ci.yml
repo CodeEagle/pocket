@@ -159,32 +159,33 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version-file: .fvmrc
           cache: true
 
       - name: Analyze and test pocket_services
         working-directory: sdk/packages/pocket_services
         run: |
-          flutter pub get
+          flutter pub get --enforce-lockfile
           flutter analyze --no-fatal-infos lib test
           flutter test
 
       - name: Analyze and test pocket_flutter
         working-directory: sdk/packages/pocket_flutter
         run: |
-          flutter pub get
+          flutter pub get --enforce-lockfile
           flutter analyze --no-fatal-infos lib test
           flutter test
 
       - name: Analyze and test sdk root package
         working-directory: sdk
         run: |
-          flutter pub get
+          flutter pub get --enforce-lockfile
           flutter analyze --no-fatal-infos lib test
           flutter test
 
       - name: Analyze and test Showcase demo Flutter host
         working-directory: demo
         run: |
-          flutter pub get
+          flutter pub get --enforce-lockfile
           flutter analyze --no-fatal-infos lib test
           flutter test

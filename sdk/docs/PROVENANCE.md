@@ -12,7 +12,7 @@
 - `editor/server.ts`、`editor/client/`、`editor/test/editor_live_probe.ts` 复用旧 PocketJSKit editor 的本地 project/build/publish 工作流（详细来源见 [EDITOR_REUSE.md](EDITOR_REUSE.md)），改为当前 guest scaffold + qjbc/PAK + `scripts/package_update.ts`。多文件 GET/PUT 有路径、symlink、构建/密钥/二进制保护；`app.js` 只作诊断，不成为 runtime 回退来源。
 - 历史迁移归档曾位于 migrations，已在审计清理提交中删除；当前仓库不再提供该快照。可参考保留的父工程 pocketjs_flutter_demo（排除 pocket_host）。当前构建和运行不依赖该外部参考源码。
 - 保留原 MIT LICENSE。缓存、编译产物、签名私钥和用户业务项目不属于源码交付。
-- 当前工具链基线：Flutter 3.47.9 / Dart 3.13.7；最低兼容基线 Flutter 3.35.x / Dart 3.9.x；Rust 1.93.1。Bun 使用上游 lockfile 安装编译器依赖。
+- 当前工具链基线：Flutter 3.50.0 / Dart 3.14.0；最低兼容基线 Flutter 3.35.x / Dart 3.9.x；Rust 1.93.1。Bun 使用上游 lockfile 安装编译器依赖。
 
 来源 Git 基线（本地工作区可能含未提交改动，不能以 commit 代替实际文件快照）：
 
