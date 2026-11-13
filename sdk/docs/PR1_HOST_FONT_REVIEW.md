@@ -88,3 +88,11 @@ the Linux CI gate; they do not substitute for its final-commit validation.
 Preview font-recording/child-load regressions passed 2/2 with real compiled
 guests and native probes; transformed-text tests passed 4/4. Both files are
 included explicitly in the isolated CI suite.
+
+The Demo was rebuilt from the merged source and passed guest state, hardware,
+video, JS-to-frame ablation, native probe, settings restoration and all three
+navigation cases. The arrow-pop regression scrolls its state summary into
+view and samples at most three real Guest frames for motion, checking state
+retention and non-decreasing x on each frame, then requiring full exit. This
+accounts for the event/transform commit boundary without removing the motion
+assertion. The tracked root bytecode/metadata were refreshed from this build.
