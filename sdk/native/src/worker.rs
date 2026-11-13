@@ -4670,6 +4670,7 @@ mod tests {
 
     #[test]
     fn official_worker_records_http_timer_and_duplex_channels_then_replays_offline() {
+        eprintln!("official-worker-http-replay: start");
         let mut server = LocalHttpFixture::start();
         let descriptor = serde_json::json!({
             "url": format!("{}/body", server.origin),
@@ -4764,6 +4765,7 @@ mod tests {
         )
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
+        eprintln!("official-worker-http-replay: record-ready");
         let mut bridge = ui_context
             .with(|ctx| unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) })
             .unwrap();
@@ -4777,6 +4779,7 @@ mod tests {
                 .unwrap();
             assert_eq!(status, STATUS_OK);
         });
+        eprintln!("official-worker-http-replay: record-pump-start");
         let recorded_outputs = collect_worker_outputs(
             &ui_context,
             &mut bridge,
@@ -4785,12 +4788,15 @@ mod tests {
             &record,
             &[],
         );
+        eprintln!("official-worker-http-replay: record-pump-complete");
         assert!(recorded_outputs
             .iter()
             .any(|record| record.as_slice() == &[3, b'p', b'o', b'n', b'g']));
         worker.request_stop_and_wait();
+        eprintln!("official-worker-http-replay: record-stop-complete");
         bridge.detach();
         worker.destroy_and_join().unwrap();
+        eprintln!("official-worker-http-replay: record-join-complete");
         let events = record.finish_batch().unwrap();
         server.close();
         assert_eq!(server.requests.load(Ordering::Relaxed), 1);
@@ -4837,6 +4843,7 @@ mod tests {
         )
         .unwrap();
         worker.wait_ready(Duration::from_secs(2)).unwrap();
+        eprintln!("official-worker-http-replay: replay-ready");
         let mut bridge = ui_context
             .with(|ctx| unsafe { worker.attach_ui(ctx.as_raw().as_ptr()) })
             .unwrap();
@@ -4856,6 +4863,7 @@ mod tests {
             )
         }
         .unwrap();
+        eprintln!("official-worker-http-replay: replay-ui-frontier-ready");
         // This is longer than the JS turn budget. Replay must park at the
         // trace gate without charging that wait to the Guest's CPU guard.
         thread::sleep(Duration::from_millis(25));
@@ -4865,6 +4873,7 @@ mod tests {
                 .unwrap();
             assert_eq!(status, STATUS_OK);
         });
+        eprintln!("official-worker-http-replay: replay-pump-start");
         let replayed_outputs = collect_worker_outputs(
             &ui_context,
             &mut bridge,
@@ -4873,6 +4882,7 @@ mod tests {
             &replay,
             &events,
         );
+        eprintln!("official-worker-http-replay: replay-pump-complete");
         assert_eq!(replayed_outputs, recorded_outputs);
         assert_eq!(
             server.requests.load(Ordering::Relaxed),
@@ -4880,8 +4890,10 @@ mod tests {
             "Replay performed HTTP"
         );
         worker.request_stop_and_wait();
+        eprintln!("official-worker-http-replay: replay-stop-complete");
         bridge.detach();
         worker.destroy_and_join().unwrap();
+        eprintln!("official-worker-http-replay: replay-join-complete");
         assert_eq!(replay.finish_batch().unwrap(), events);
 
         let request_index = events
@@ -4904,6 +4916,7 @@ mod tests {
         )
         .unwrap();
         active_replay.wait_ready(Duration::from_secs(2)).unwrap();
+        eprintln!("official-worker-http-replay: prefix-ready");
         let stub_deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let has_active_stub = active_replay
@@ -4916,16 +4929,73 @@ mod tests {
             if has_active_stub {
                 break;
             }
-            assert!(
-                Instant::now() < stub_deadline,
-                "Replay HTTP stub was not admitted"
-            );
+            if Instant::now() >= stub_deadline {
+                let next_event = match replay_stop.peek_replay() {
+                    Ok(Some(event)) => format!(
+                        "{} {:?}/{}/{}",
+                        event.seq,
+                        TraceActor::for_event(Mode::Replay, &event),
+                        event.session,
+                        event.kind
+                    ),
+                    Ok(None) => "none".to_owned(),
+                    Err(error) => format!("trace-error: {error}"),
+                };
+                let prefix_context = replay_prefix
+                    .iter()
+                    .map(|event| {
+                        format!(
+                            "{} {:?}/{}/{}",
+                            event.seq,
+                            TraceActor::for_event(Mode::Replay, event),
+                            event.session,
+                            event.kind
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let requests = active_replay
+                    .state
+                    .requests
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .iter()
+                    .map(|(id, request)| {
+                        (
+                            *id,
+                            request.replay_stub,
+                            request.finished.load(Ordering::Acquire),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let (exited, allow_destroy) = {
+                    let lifecycle = active_replay
+                        .state
+                        .lifecycle
+                        .0
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    (lifecycle.exited, lifecycle.allow_destroy)
+                };
+                panic!(
+                    "Replay HTTP stub was not admitted: worker_error={:?}; next_replay_event={next_event}; replay_prefix={prefix_context:?}; worker_state={{stop_requested:{},offline_shutdown:{},runner_present:{},core_present:{},exited:{exited},allow_destroy:{allow_destroy}}}; requests={requests:?}",
+                    active_replay.last_error(),
+                    active_replay.state.stop_requested.load(Ordering::Acquire),
+                    active_replay.state.offline_shutdown.load(Ordering::Acquire),
+                    !active_replay.state.runner.load(Ordering::Acquire).is_null(),
+                    !active_replay.state.core.load(Ordering::Acquire).is_null(),
+                );
+            }
             thread::sleep(Duration::from_millis(1));
         }
+        eprintln!("official-worker-http-replay: prefix-request-admitted");
         active_replay.prepare_replay_stop();
+        eprintln!("official-worker-http-replay: prefix-prepare-stop-complete");
         replay_stop.set_live();
+        eprintln!("official-worker-http-replay: prefix-trace-live");
         active_replay.request_stop_and_wait();
+        eprintln!("official-worker-http-replay: prefix-stop-complete");
         active_replay.destroy_and_join().unwrap();
+        eprintln!("official-worker-http-replay: prefix-join-complete");
         assert_eq!(
             server.requests.load(Ordering::Relaxed),
             1,
