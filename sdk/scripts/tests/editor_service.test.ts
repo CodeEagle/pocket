@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, utimesSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -185,6 +185,7 @@ function createSourceUpgradeFixture() {
     writeJson(join(sdk, "package.json"), {
       name: "pocketjs-sdk",
       version,
+      type: "module",
       dependencies: { fixtureDependency: "1.0.0" },
     });
     writeJson(join(sdk, "package-lock.json"), {
@@ -210,7 +211,8 @@ function createSourceUpgradeFixture() {
   writeFileSync(join(sdk, "editor", "server.ts"), `
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-const sdk = resolve(dirname(new URL(import.meta.url).pathname), "..");
+import { fileURLToPath } from "node:url";
+const sdk = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { version } = JSON.parse(readFileSync(join(sdk, "package.json"), "utf8"));
 const workspace = process.argv.find(value => value.startsWith("--workspace="))?.slice("--workspace=".length);
 const server = Bun.serve({
@@ -276,6 +278,61 @@ async function allocateLoopbackPort(): Promise<number> {
   const port = server.port;
   server.stop(true);
   return port;
+}
+
+function summarizeCliResult(result: ReturnType<typeof spawnSync>) {
+  return {
+    status: result.status,
+    signal: result.signal,
+    error: result.error?.message,
+    stdout: result.stdout?.toString(),
+    stderr: result.stderr?.toString(),
+  };
+}
+
+async function preserveSourceCliDiagnostics(
+  source: ReturnType<typeof createSourceUpgradeFixture>,
+  serviceCli: string,
+  serviceScript: string,
+  childEnv: NodeJS.ProcessEnv,
+  port: number,
+  commandResults: Record<string, ReturnType<typeof summarizeCliResult>>,
+  failure: unknown,
+): Promise<string> {
+  const root = join(process.env.RUNNER_TEMP || tmpdir(), "pocket-studio-upgrade-diagnostics");
+  const directory = join(root, `source-cli-${process.pid}-${Date.now()}`);
+  mkdirSync(directory, { recursive: true });
+  const status = spawnSync(serviceCli, [serviceScript, "status"], {
+    cwd: source.repo,
+    env: childEnv,
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  let health: unknown;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_500) });
+    health = { status: response.status, body: await response.text() };
+  } catch (error) {
+    health = { error: error instanceof Error ? error.message : String(error) };
+  }
+  writeJson(join(directory, "source-cli-failure.json"), {
+    error: failure instanceof Error ? failure.message : String(failure),
+    port,
+    repo: source.repo,
+    sdk: source.sdk,
+    commands: commandResults,
+    status: summarizeCliResult(status),
+    health,
+  });
+  const buildDir = join(source.sdk, ".pocket-build");
+  for (const [sourceName, targetName] of [
+    ["editor-service-8791.log", "editor-service.log"],
+    ["editor-service-8791.pid.json", "editor-service.pid.json"],
+  ]) {
+    const path = join(buildDir, sourceName);
+    if (existsSync(path)) copyFileSync(path, join(directory, targetName));
+  }
+  return directory;
 }
 
 describe("editor service launch config", () => {
@@ -711,17 +768,19 @@ test("source upgrade applies the staged Git commit through the real service CLI 
     "POCKET_SOURCE_BUILD", "POCKET_EDITOR_PORT", "POCKET_EDITOR_UPDATE_PORT", "POCKET_EDITOR_BUN",
     "POCKET_COMPILER_PATH", "POCKET_NATIVE_PROBE", "POCKET_TOOLS_PACKAGE", "POCKET_UPSTREAM_ROOT", "POCKET_BYTECODE_BIN",
   ]) delete childEnv[name];
-  let serviceStarted = false;
+  let serviceStartAttempted = false;
   let parentLock: (() => void) | undefined;
+  const commandResults: Record<string, ReturnType<typeof summarizeCliResult>> = {};
   try {
+    serviceStartAttempted = true;
     const start = spawnSync(serviceCli, [serviceScript, "start"], {
       cwd: source.repo,
       env: childEnv as NodeJS.ProcessEnv,
       encoding: "utf8",
       timeout: 20_000,
     });
+    commandResults.start = summarizeCliResult(start);
     if (start.status !== 0) throw new Error(`source service start failed: ${start.error || ""}\n${start.stdout}\n${start.stderr}`);
-    serviceStarted = true;
     const firstHealth = await (await fetch(`http://127.0.0.1:${port}/health`)).json() as { ok: boolean; version: string; pid: number };
     expect(firstHealth).toMatchObject({ ok: true, version: "1.0.0" });
 
@@ -747,6 +806,7 @@ test("source upgrade applies the staged Git commit through the real service CLI 
       encoding: "utf8",
       timeout: 30_000,
     });
+    commandResults.upgradeApply = summarizeCliResult(apply);
     parentLock();
     parentLock = undefined;
     if (apply.status !== 0) throw new Error(`source upgrade CLI failed: ${apply.error || ""}\n${apply.stdout}\n${apply.stderr}`);
@@ -772,6 +832,7 @@ test("source upgrade applies the staged Git commit through the real service CLI 
       encoding: "utf8",
       timeout: 20_000,
     });
+    commandResults.restart = summarizeCliResult(restart);
     if (restart.status !== 0) throw new Error(`source service restart after upgrade failed: ${restart.error || ""}\n${restart.stdout}\n${restart.stderr}`);
     const thirdHealth = await (await fetch(`http://127.0.0.1:${port}/health`)).json() as { ok: boolean; version: string; pid: number };
     expect(thirdHealth).toMatchObject({ ok: true, version: "1.0.1" });
@@ -781,9 +842,20 @@ test("source upgrade applies the staged Git commit through the real service CLI 
     expect(restartedRecord.config.nativeProbe).toBe(expectedProbe);
     expect(existsSync(source.stageDir)).toBe(false);
     expect(existsSync(join(source.sdk, ".pocket-build", "sdk-upgrade-backup-1.0.0"))).toBe(false);
+  } catch (error) {
+    const directory = await preserveSourceCliDiagnostics(
+      source,
+      serviceCli,
+      serviceScript,
+      childEnv as NodeJS.ProcessEnv,
+      port,
+      commandResults,
+      error,
+    );
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\nSource CLI diagnostics: ${directory}`);
   } finally {
     parentLock?.();
-    if (serviceStarted) {
+    if (serviceStartAttempted) {
       spawnSync(serviceCli, [serviceScript, "stop"], {
         cwd: source.repo,
         env: childEnv as NodeJS.ProcessEnv,
