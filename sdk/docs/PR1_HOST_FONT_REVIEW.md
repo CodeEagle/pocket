@@ -121,7 +121,7 @@ server and its other Worker stopped. Browser tests wait for the observable
 dirty-draft deferral before asserting it; failed fixtures retain logs, process
 facts and persisted upgrade status before cleanup.
 
-The release command passed all 26 tests and 148 assertions on macOS with
+The release command passed all 27 tests and 165 assertions on macOS with
 Playwright Chromium and Bun 1.4.4. The same group is included in Linux CI
 before packaging. SDK version 0.1.14 supersedes the unpublished 0.1.13 candidate.
 
