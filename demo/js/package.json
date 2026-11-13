@@ -7,6 +7,9 @@
     "@pocket/ui": "file:../../sdk/packages/pocket_ui",
     "@pocket/looseleaf": "file:../../sdk/packages/pocket_looseleaf"
   },
+  "overrides": {
+    "@pocket/ui": "file:../../sdk/packages/pocket_ui"
+  },
   "scripts": {
     "build": "bun ../../sdk/scripts/build_guest.ts --project-root=\"$PWD\" --copy-assets-to=\"$PWD/../assets\" --keep-source=\"$PWD/.pocket-build/app.js\"",
     "test": "bash scripts/test_guest.sh",

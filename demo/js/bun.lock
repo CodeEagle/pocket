@@ -5,11 +5,19 @@
     "": {
       "name": "pocket-showcase-demo",
       "dependencies": {
+        "@pocket/looseleaf": "file:../../sdk/packages/pocket_looseleaf",
         "@pocket/ui": "file:../../sdk/packages/pocket_ui",
       },
     },
   },
+  "overrides": {
+    "@pocket/ui": "file:../../sdk/packages/pocket_ui",
+  },
   "packages": {
+    "@pocket/looseleaf": ["@pocket/looseleaf@file:../../sdk/packages/pocket_looseleaf", { "dependencies": { "@pocket/ui": "0.1.0" } }],
+
     "@pocket/ui": ["@pocket/ui@file:../../sdk/packages/pocket_ui", {}],
+
+    "@pocket/looseleaf/@pocket/ui": ["@pocket/ui@file:../../sdk/packages/pocket_ui", {}],
   }
 }
