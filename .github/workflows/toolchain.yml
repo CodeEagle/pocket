@@ -34,7 +34,7 @@ jobs:
         id: web-engine-cache
         with:
           path: sdk/.pocket-build/web-engine
-          key: web-engine-rust1.98.1-bun1.3.9-${{ hashFiles('sdk/native/**', 'sdk/targets/**', 'sdk/scripts/build_web_engine.ts', 'sdk/scripts/build_wechat.ts', 'sdk/scripts/build_guest.ts', 'sdk/scripts/prepare_upstream.py', 'sdk/bun.lock') }}
+          key: web-engine-rust1.98.1-bun1.3.9-${{ hashFiles('sdk/native/**', '!sdk/native/target/**', 'sdk/targets/**', 'sdk/scripts/build_web_engine.ts', 'sdk/scripts/build_wechat.ts', 'sdk/scripts/build_guest.ts', 'sdk/scripts/prepare_upstream.py', 'sdk/bun.lock') }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24

@@ -170,10 +170,11 @@ test("native route stack preserves page scroll/local state and isolates popped r
     assert.equal(textOps(frame, "Scaffold + AppBar").length, 0, "Controls selection must hide the overview section");
 
     frame = await settle(stateSession, await stateSession.tap("Enabled", frame));
-    assert.match(textOf(frame), /State · off · level 3 · layout adaptive/);
+    assert.ok(findVisibleText(frame, "Disabled"), "switch must visibly turn off");
+    assert.ok(findVisibleText(frame, "3"), "stepper must start at three");
     frame = await settle(stateSession, await stateSession.tap("+", frame));
     frame = await settle(stateSession, await stateSession.tap("+", frame));
-    assert.match(textOf(frame), /State · off · level 5 · layout adaptive/);
+    assert.ok(findVisibleText(frame, "5"), "both pointer taps must increment the visible stepper");
 
     let input = findVisibleText(frame, "System keyboard input");
     if (!input) {

@@ -83,6 +83,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
+          targets: wasm32-unknown-unknown
 
       - name: Cache pinned PocketJS upstream
         uses: actions/cache@v4
@@ -105,7 +106,7 @@ jobs:
       - name: Install system patch tool
         run: |
           sudo apt-get update
-          sudo apt-get install -y patch
+          sudo apt-get install -y patch llvm lld
 
       - name: Prepare pinned PocketJS upstream
         working-directory: sdk
@@ -117,6 +118,23 @@ jobs:
         working-directory: sdk
         run: npm install --ignore-scripts --legacy-peer-deps --no-audit --no-fund
 
+      - name: Install Chromium for browser regression tests
+        working-directory: sdk
+        run: npx playwright install --with-deps chromium
+
+      - uses: actions/cache@v4
+        id: web-engine-cache
+        with:
+          path: sdk/.pocket-build/web-engine
+          key: web-engine-rust1.98.1-bun1.3.9-${{ hashFiles('sdk/native/**', '!sdk/native/target/**', 'sdk/targets/**', 'sdk/scripts/build_web_engine.ts', 'sdk/scripts/build_wechat.ts', 'sdk/scripts/build_guest.ts', 'sdk/scripts/prepare_upstream.py', 'sdk/bun.lock') }}
+
+      - name: Build current WebAssembly engine for browser suites
+        if: steps.web-engine-cache.outputs.cache-hit != 'true'
+        working-directory: sdk
+        env:
+          POCKET_WECHAT_LLVM_AR: /usr/bin/llvm-ar
+        run: bun scripts/build_web_engine.ts --outdir=.pocket-build/web-engine
+
       - name: Install Showcase demo JS dependencies
         working-directory: demo/js
         run: bun install --ignore-scripts
@@ -127,24 +145,26 @@ jobs:
       - name: Run SDK JS package and toolchain suites
         working-directory: sdk
         env:
+          POCKET_WEB_RUNTIME: ${{ github.workspace }}/sdk/.pocket-build/web-engine/pocket-web.js
+          POCKET_WEB_ENGINE: ${{ github.workspace }}/sdk/.pocket-build/web-engine/pocketjs.wasm
           POCKET_SOURCE_BUILD: "1"
           POCKET_BYTECODE_BIN: ${{ github.workspace }}/sdk/native/target/release/pocketjs_bytecode
           POCKET_NATIVE_PROBE: ${{ github.workspace }}/sdk/native/target/release/pocket_probe
         run: |
-          bun test --timeout 60000 \
+          bun scripts/test_js.ts \
             packages/pocket_ui/test \
             packages/pocket_vn/test \
             packages/pocket_spine/test \
             packages/pocket_live2d/test \
             packages/pocket_tftc/test \
+            packages/pocket_diagnostics/test \
             tests \
-            scripts/tests/prebuilt_tools.test.ts \
-            scripts/tests/package_toolchain.test.ts \
-            scripts/tests/export_web_sdk.test.ts \
-            scripts/tests/package_update.test.ts
+            scripts/tests
 
       - name: Run Showcase guest compilation, ablation, and native probe suites
         env:
+          POCKET_WEB_RUNTIME: ${{ github.workspace }}/sdk/.pocket-build/web-engine/pocket-web.js
+          POCKET_WEB_ENGINE: ${{ github.workspace }}/sdk/.pocket-build/web-engine/pocketjs.wasm
           POCKET_SOURCE_BUILD: "1"
           POCKET_BYTECODE_BIN: ${{ github.workspace }}/sdk/native/target/release/pocketjs_bytecode
           POCKET_NATIVE_PROBE: ${{ github.workspace }}/sdk/native/target/release/pocket_probe
@@ -156,8 +176,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read repository Flutter pin
+        id: flutter-pin
+        run: python3 -c 'import json, os; open(os.environ["GITHUB_OUTPUT"], "a").write("version=" + json.load(open(".fvmrc"))["flutter"] + "\n")'
+
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ steps.flutter-pin.outputs.version }}
           channel: stable
           cache: true
 

@@ -50,6 +50,13 @@ export async function loadPocketFlutterPlatformContracts(): Promise<PlatformCont
   const capabilities = platform.defineCapabilityRegistry([
     ...platform.POCKET_CAPABILITIES,
     ...FLUTTER_SYSTEM_CAPABILITIES,
+    // Known optional SDK transport capabilities. Registration allows a package
+    // to request an enhancement; it does not advertise host availability.
+    "media.audio.play",
+    "media.audio.stop",
+    "media.audio.pause",
+    "media.audio.resume",
+    "media.audio.volume",
   ]);
   const target = {
     hostAbi: generation.POCKET_BINDING_GENERATION,

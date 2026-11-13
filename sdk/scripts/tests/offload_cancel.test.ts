@@ -20,16 +20,16 @@ test("pinned offload client completes provider replies and propagates cancellati
   );
 
   let session = 9;
-  let submitted: string | undefined;
-  let reply: string | undefined;
+  let submitted: { id: number; method: string } | undefined;
+  let reply: { id: number; payload: string } | undefined;
   const cancellations: Array<[number, number]> = [];
   const client = createOffloadClient({
     session: () => session,
-    submit(record: string) {
+    submitValue(record: { id: number; method: string }) {
       submitted = record;
       return true;
     },
-    take() {
+    takeValue() {
       const next = reply;
       reply = undefined;
       return next;
@@ -43,7 +43,7 @@ test("pinned offload client completes provider replies and propagates cancellati
     result = value;
   });
   client.step();
-  expect(submitted).toContain('"method":"compute.sum"');
+  expect(submitted?.method).toBe("compute.sum");
   expect(client.pending()).toBe(1);
   client.cancel(id);
   expect(client.pending()).toBe(0);
@@ -53,9 +53,9 @@ test("pinned offload client completes provider replies and propagates cancellati
     result = value;
   });
   client.step();
-  const request = JSON.parse(submitted!) as { id: number };
+  const request = submitted!;
   expect(request.id).toBe(completed);
-  reply = JSON.stringify({ id: completed, payload: "9" });
+  reply = { id: completed, payload: "9" };
   client.step();
   expect(result).toEqual({ ok: true, value: "9" });
   expect(client.pending()).toBe(0);
@@ -69,11 +69,11 @@ test("offload reports a missing provider on its next frame pump", async () => {
   let result: unknown;
   const client = createOffloadClient({
     session: () => 0,
-    submit() {
+    submitValue() {
       submits++;
       return false;
     },
-    take: () => undefined,
+    takeValue: () => undefined,
   });
   client.request("http.get", "{}", (value) => {
     result = value;
@@ -89,16 +89,16 @@ test("native event-driven offload parks sent requests until a host wake", async 
   const { createOffloadClient } = await import(
     "../../.cache/pocketjs/framework/src/offload.ts"
   );
-  let submitted: string | undefined;
-  let reply: string | undefined;
+  let submitted: { id: number; method: string } | undefined;
+  let reply: { id: number; payload: string } | undefined;
   const ops = {
     eventDriven: true,
     session: () => 11,
-    submit(record: string) {
+    submitValue(record: { id: number; method: string }) {
       submitted = record;
       return true;
     },
-    take() {
+    takeValue() {
       const next = reply;
       reply = undefined;
       return next;
@@ -111,14 +111,14 @@ test("native event-driven offload parks sent requests until a host wake", async 
   });
   expect(client.needsPump()).toBe(true);
   client.step();
-  expect(submitted).toContain('"method":"compute.sum"');
+  expect(submitted?.method).toBe("compute.sum");
   expect(client.needsPump()).toBe(false);
   for (let frame = 0; frame < 100; frame++) client.step();
   expect(client.needsPump()).toBe(false);
   expect(result).toBeUndefined();
 
-  const request = JSON.parse(submitted!) as { id: number };
-  reply = JSON.stringify({ id: request.id, payload: "6" });
+  const request = submitted!;
+  reply = { id: request.id, payload: "6" };
   // In production this step is called by the single NativeCallable wake.
   client.step();
   expect(result).toEqual({ ok: true, value: "6" });
@@ -133,8 +133,8 @@ test("disposing an event-driven client forwards cancellation for every sent requ
   const client = createOffloadClient({
     eventDriven: true,
     session: () => 13,
-    submit: () => true,
-    take: () => undefined,
+    submitValue: () => true,
+    takeValue: () => undefined,
     cancel(id: number, session: number) {
       cancellations.push([id, session]);
     },
