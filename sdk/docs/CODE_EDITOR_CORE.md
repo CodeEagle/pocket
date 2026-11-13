@@ -254,3 +254,9 @@ averages over 200 iterations. Asserted bounds are generous (Bun full tokenise < 
 - Multi-cursor typing is not coalesced; word-wise multi-cursor delete merges overlapping edits.
 - Tokenizer does not parse TypeScript types or template-literal types; the regex flag is not reset by ASI.
 - Soft-keyboard Backspace on mobile does not arrive as a key edge (host limitation, desktop target).
+
+## UI layer
+
+The component that renders this core (`CodeView`, virtualised rows, raw text session, find bar,
+clipboard/save intents, measured numbers and open macOS checks) is documented in
+`CODE_VIEW.md`.

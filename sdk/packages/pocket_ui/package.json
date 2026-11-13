@@ -30,6 +30,7 @@
     "./system-surfaces": "./src/system-surfaces.tsx",
     "./inline-text": "./src/inline-text.tsx",
     "./code": "./src/code/index.ts",
+    "./code-view": "./src/code/view.tsx",
     "./dev": "./src/dev.ts"
   }
 }
